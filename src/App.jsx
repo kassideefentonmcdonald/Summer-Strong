@@ -1,15 +1,8 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "./supabase";
 
 const TOTAL_DAYS = 90;
 const START_DATE = "2026-03-30";
-const FIELDS = ["water", "protein", "green", "red"];
-const FIELD_META = {
-  water:   { icon: "💧", label: "Water" },
-  protein: { icon: "🥩", label: "Protein" },
-  green:   { icon: "🟢", label: "Green Ring" },
-  red:     { icon: "🔴", label: "Red Ring" },
-};
 const MAX_PER_PERSON = TOTAL_DAYS * 4;
 const COLORS = ["#c04a4c","#FCC728","#4ab0f5","#4caf50","#b57bee","#f0944d","#e55fa3","#5ececa"];
 const BUYIN = 20;
@@ -47,10 +40,23 @@ function buildDays() {
 function fmtDate(str) {
   return new Date(str + "T12:00:00").toLocaleDateString("en-US", { month:"long", day:"numeric", year:"numeric" });
 }
+function goalsHit(input, goals) {
+  if (!input) return { water:false, protein:false, green:false, red:false };
+  return {
+    water:    (input.water_oz   || 0) >= (goals.water   || 0),
+    protein:  (input.protein_g  || 0) >= (goals.protein || 0),
+    green:    (input.exercise_min|| 0) >= 30,
+    red:      (input.calories   || 0) >= (goals.red     || 500),
+  };
+}
+function countHit(input, goals) {
+  const h = goalsHit(input, goals); 
+  return Object.values(h).filter(Boolean).length;
+}
 
 export default function App() {
   const [participants, setParticipants] = useState([]);
-  const [log, setLog] = useState({});
+  const [inputs, setInputs] = useState({});   // inputs[date][person_id] = row
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [activeTab, setActiveTab] = useState("info");
@@ -61,29 +67,28 @@ export default function App() {
   const [logPerson, setLogPerson] = useState(null);
   const [lastSync, setLastSync] = useState(null);
   const [copied, setCopied] = useState(false);
+  const [celebration, setCelebration] = useState(null); // {type:'single'|'all4', label}
+  const [activeDayLog, setActiveDayLog] = useState(null); // person_id being logged today
+  const [draftInputs, setDraftInputs] = useState({});
+  const celebTimerRef = useRef(null);
   const today = todayStr();
   const days = buildDays();
   const hasStarted = today >= START_DATE;
   const currentDayNum = getDayNumber(today);
 
-  // ── Load all data from Supabase ──
   const loadAll = useCallback(async () => {
     setLoading(true);
-    const [{ data: pData }, { data: lData }] = await Promise.all([
+    const [{ data: pData }, { data: iData }] = await Promise.all([
       supabase.from("participants").select("*").order("created_at"),
-      supabase.from("daily_log").select("*"),
+      supabase.from("daily_inputs").select("*"),
     ]);
-
     setParticipants(pData || []);
-
-    // Build log object: log[date][person_id][field] = checked
-    const logObj = {};
-    (lData || []).forEach(({ person_id, date, field, checked }) => {
-      if (!logObj[date]) logObj[date] = {};
-      if (!logObj[date][person_id]) logObj[date][person_id] = {};
-      logObj[date][person_id][field] = checked;
+    const inp = {};
+    (iData || []).forEach(row => {
+      if (!inp[row.date]) inp[row.date] = {};
+      inp[row.date][row.person_id] = row;
     });
-    setLog(logObj);
+    setInputs(inp);
     setLastSync(new Date());
     setLoading(false);
   }, []);
@@ -91,25 +96,79 @@ export default function App() {
   useEffect(() => { loadAll(); }, [loadAll]);
   useEffect(() => { const t = setInterval(loadAll, 30000); return () => clearInterval(t); }, [loadAll]);
 
-  const getEntry = (date, personId, field) => log?.[date]?.[personId]?.[field] || false;
+  const getInput = (date, personId) => inputs?.[date]?.[personId] || null;
 
-  const toggleEntry = async (date, personId, field) => {
-    const current = getEntry(date, personId, field);
-    const next = !current;
-    // Optimistic update
-    setLog(prev => {
+  const calcPoints = (personId) => {
+    const p = participants.find(x => x.id === personId);
+    if (!p) return 0;
+    let pts = 0;
+    Object.entries(inputs).forEach(([date, dayInputs]) => {
+      const inp = dayInputs?.[personId];
+      if (!inp) return;
+      pts += countHit(inp, p.goals);
+    });
+    return pts;
+  };
+
+  const triggerCelebration = (type, label) => {
+    if (celebTimerRef.current) clearTimeout(celebTimerRef.current);
+    setCelebration({ type, label });
+    celebTimerRef.current = setTimeout(() => setCelebration(null), type === 'all4' ? 3500 : 2000);
+  };
+
+  const openDayLog = (personId) => {
+    const existing = getInput(today, personId) || {};
+    setDraftInputs({
+      water_oz: existing.water_oz || "",
+      protein_g: existing.protein_g || "",
+      exercise_min: existing.exercise_min || "",
+      calories: existing.calories || "",
+    });
+    setActiveDayLog(personId);
+  };
+
+  const saveDayLog = async (personId) => {
+    const p = participants.find(x => x.id === personId);
+    if (!p) return;
+    setSaving(true);
+    const row = {
+      person_id: personId,
+      date: today,
+      water_oz: parseFloat(draftInputs.water_oz) || 0,
+      protein_g: parseFloat(draftInputs.protein_g) || 0,
+      exercise_min: parseFloat(draftInputs.exercise_min) || 0,
+      calories: parseFloat(draftInputs.calories) || 0,
+    };
+    await supabase.from("daily_inputs").upsert(row, { onConflict: "person_id,date" });
+
+    // Check what was hit before vs after
+    const prevInp = getInput(today, personId);
+    const prevHit = countHit(prevInp, p.goals);
+    const newHit = countHit(row, p.goals);
+    const newGoalsObj = goalsHit(row, p.goals);
+    const prevGoalsObj = goalsHit(prevInp, p.goals);
+
+    // Update local state
+    setInputs(prev => {
       const updated = { ...prev };
-      if (!updated[date]) updated[date] = {};
-      if (!updated[date][personId]) updated[date][personId] = {};
-      updated[date][personId][field] = next;
+      if (!updated[today]) updated[today] = {};
+      updated[today][personId] = row;
       return updated;
     });
-    setSaving(true);
-    await supabase.from("daily_log").upsert(
-      { person_id: personId, date, field, checked: next },
-      { onConflict: "person_id,date,field" }
-    );
+
+    // Trigger celebrations
+    if (newHit === 4 && prevHit < 4) {
+      triggerCelebration('all4', p.name);
+    } else if (newHit > prevHit) {
+      const newlyHit = Object.entries(newGoalsObj).find(([k,v]) => v && !prevGoalsObj[k]);
+      if (newlyHit) {
+        const labels = { water:'💧 Water goal hit!', protein:'🥩 Protein goal hit!', green:'🟢 Green ring hit!', red:'🔴 Red ring hit!' };
+        triggerCelebration('single', labels[newlyHit[0]]);
+      }
+    }
+
     setSaving(false);
+    setActiveDayLog(null);
   };
 
   const addParticipant = async () => {
@@ -137,24 +196,12 @@ export default function App() {
     setSaving(false);
   };
 
-  const calcPoints = (personId) => {
-    let pts = 0;
-    Object.values(log).forEach(dayLog => {
-      const p = dayLog?.[personId]; if (!p) return;
-      FIELDS.forEach(f => { if (p[f]) pts++; });
-    });
-    return pts;
-  };
-
   const sorted = [...participants].sort((a,b) => calcPoints(b.id) - calcPoints(a.id));
   const pot = participants.length * BUYIN;
   const first = Math.floor(pot * 0.7);
   const second = Math.floor(pot * 0.3);
-
   const copyPrompt = () => {
-    navigator.clipboard.writeText(AI_PROMPT).then(() => {
-      setCopied(true); setTimeout(() => setCopied(false), 2500);
-    });
+    navigator.clipboard.writeText(AI_PROMPT).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2500); });
   };
 
   return (
@@ -166,48 +213,33 @@ export default function App() {
         .sf{font-family:'DM Serif Display',serif;}
         .df{font-family:'DM Sans',sans-serif;}
         body{background:#080810;}
-
         .hero{
           background:radial-gradient(ellipse at 70% -10%,#7D3031 0%,transparent 52%),
                      radial-gradient(ellipse at -5% 100%,#FCC728 0%,transparent 48%),#080810;
           padding:38px 22px 28px;text-align:center;
           border-bottom:1px solid rgba(255,255,255,0.05);position:relative;overflow:hidden;
         }
-        .hero::before{
-          content:'';position:absolute;inset:0;pointer-events:none;
-          background:repeating-linear-gradient(90deg,transparent,transparent 58px,rgba(255,255,255,0.01) 58px,rgba(255,255,255,0.01) 59px),
-                     repeating-linear-gradient(0deg,transparent,transparent 58px,rgba(255,255,255,0.008) 58px,rgba(255,255,255,0.008) 59px);
-        }
+        .hero::before{content:'';position:absolute;inset:0;pointer-events:none;
+          background:repeating-linear-gradient(90deg,transparent,transparent 58px,rgba(255,255,255,0.01) 58px,rgba(255,255,255,0.01) 59px);}
         .tabs{display:flex;background:#0c0c16;border-bottom:1px solid rgba(255,255,255,0.06);overflow-x:auto;}
-        .tab{
-          flex:1;min-width:52px;padding:13px 4px;text-align:center;cursor:pointer;border:none;background:none;
+        .tab{flex:1;min-width:52px;padding:13px 4px;text-align:center;cursor:pointer;border:none;background:none;
           font-family:'DM Sans',sans-serif;font-size:10px;font-weight:600;letter-spacing:1.1px;
-          text-transform:uppercase;color:rgba(255,255,255,0.28);border-bottom:2px solid transparent;transition:all 0.2s;white-space:nowrap;
-        }
+          text-transform:uppercase;color:rgba(255,255,255,0.28);border-bottom:2px solid transparent;transition:all 0.2s;white-space:nowrap;}
         .tab.on{color:#FCC728;border-bottom:2px solid #FCC728;}
         .tab:hover{color:rgba(255,255,255,0.55);}
         .card{background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.07);border-radius:14px;padding:18px;margin:10px 12px;}
         .bar-bg{height:7px;background:rgba(255,255,255,0.07);border-radius:99px;margin-top:10px;overflow:hidden;}
         .bar-fill{height:100%;border-radius:99px;transition:width 0.7s ease;}
-        .cbtn{
-          width:34px;height:34px;border-radius:50%;border:2px solid rgba(255,255,255,0.1);
-          background:transparent;cursor:pointer;display:flex;align-items:center;justify-content:center;
-          font-size:15px;transition:all 0.15s;flex-shrink:0;
-        }
-        .cbtn.cw{background:#1a3d5c;border-color:#4ab0f5;}
-        .cbtn.cp{background:#3d1a1a;border-color:#e55;}
-        .cbtn.cg{background:#1a3d1a;border-color:#4caf50;}
-        .cbtn.cr{background:#3d1a1a;border-color:#c04a4c;}
-        .cbtn:hover:not(:disabled){border-color:rgba(255,255,255,0.4);}
-        .cbtn:disabled{cursor:not-allowed;opacity:0.3;}
-        .day-row{display:flex;align-items:center;gap:6px;padding:7px 12px;border-bottom:1px solid rgba(255,255,255,0.03);transition:background 0.1s;}
-        .day-row:hover{background:rgba(255,255,255,0.018);}
-        .day-row.tr{background:rgba(252,199,40,0.04);border-left:3px solid #FCC728;padding-left:9px;}
         .badge{display:inline-block;background:rgba(252,199,40,0.1);color:#FCC728;border:1px solid rgba(252,199,40,0.22);border-radius:99px;padding:3px 12px;font-family:'DM Sans',sans-serif;font-size:12px;font-weight:500;}
         .note{font-family:'DM Sans',sans-serif;font-size:11px;color:rgba(255,255,255,0.27);}
         .inp{width:100%;background:rgba(255,255,255,0.055);border:1px solid rgba(255,255,255,0.11);border-radius:10px;padding:12px 14px;color:#fff;font-family:'DM Sans',sans-serif;font-size:15px;outline:none;transition:border 0.2s;}
         .inp:focus{border-color:rgba(252,199,40,0.45);}
         .inp::placeholder{color:rgba(255,255,255,0.22);}
+        .num-inp{background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:10px 12px;color:#fff;font-family:'DM Sans',sans-serif;font-size:16px;font-weight:500;outline:none;width:100%;transition:border 0.2s;-moz-appearance:textfield;}
+        .num-inp::-webkit-inner-spin-button,.num-inp::-webkit-outer-spin-button{-webkit-appearance:none;}
+        .num-inp:focus{border-color:rgba(252,199,40,0.5);}
+        .num-inp.hit{border-color:rgba(76,175,80,0.6);background:rgba(76,175,80,0.08);}
+        .num-inp::placeholder{color:rgba(255,255,255,0.2);}
         .btn-gold{background:linear-gradient(135deg,#b8920a,#FCC728);border:none;padding:14px 28px;border-radius:99px;font-family:'Bebas Neue',sans-serif;font-size:18px;letter-spacing:2px;color:#0a0a0f;cursor:pointer;transition:transform 0.15s,opacity 0.15s;width:100%;}
         .btn-gold:hover:not(:disabled){transform:scale(1.02);}
         .btn-gold:disabled{opacity:0.4;cursor:not-allowed;}
@@ -230,12 +262,52 @@ export default function App() {
         .venmo-box{background:rgba(0,130,242,0.12);border:1px solid rgba(0,130,242,0.25);border-radius:14px;padding:18px;margin-bottom:12px;text-align:center;cursor:pointer;transition:background 0.15s;text-decoration:none;display:block;}
         .venmo-box:hover{background:rgba(0,130,242,0.22);}
         .prompt-box{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px;font-family:'DM Sans',sans-serif;font-size:12px;color:rgba(255,255,255,0.5);line-height:1.7;white-space:pre-wrap;word-break:break-word;}
-        .copy-btn{background:rgba(252,199,40,0.12);border:1px solid rgba(252,199,40,0.3);color:#FCC728;border-radius:99px;padding:8px 20px;font-family:'DM Sans',sans-serif;font-size:12px;font-weight:600;cursor:pointer;transition:all 0.15s;letter-spacing:0.5px;}
+        .copy-btn{background:rgba(252,199,40,0.12);border:1px solid rgba(252,199,40,0.3);color:#FCC728;border-radius:99px;padding:8px 20px;font-family:'DM Sans',sans-serif;font-size:12px;font-weight:600;cursor:pointer;transition:all 0.15s;}
         .copy-btn:hover{background:rgba(252,199,40,0.2);}
         .copy-btn.done{background:rgba(76,175,80,0.2);border-color:rgba(76,175,80,0.4);color:#4caf50;}
         .info-divider{height:1px;background:rgba(255,255,255,0.05);margin:20px 0;}
         .pill-btn{padding:6px 14px;border-radius:99px;font-family:'DM Sans',sans-serif;font-size:12px;font-weight:500;cursor:pointer;white-space:nowrap;transition:all 0.15s;}
+        .log-btn{background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:8px 16px;font-family:'DM Sans',sans-serif;font-size:12px;color:rgba(255,255,255,0.5);cursor:pointer;transition:all 0.15s;white-space:nowrap;}
+        .log-btn:hover{border-color:rgba(252,199,40,0.3);color:#FCC728;}
+
+        /* Celebration overlay */
+        .celeb-overlay{position:fixed;inset:0;z-index:200;display:flex;align-items:center;justify-content:center;pointer-events:none;}
+        .celeb-single{background:rgba(20,20,30,0.92);border:1px solid rgba(252,199,40,0.3);border-radius:20px;padding:20px 32px;text-align:center;animation:popIn 0.3s ease;}
+        .celeb-all4{background:rgba(20,20,30,0.95);border:2px solid #FCC728;border-radius:24px;padding:32px 40px;text-align:center;animation:popIn 0.4s ease;box-shadow:0 0 60px rgba(252,199,40,0.3);}
+        @keyframes popIn{0%{transform:scale(0.7);opacity:0;}70%{transform:scale(1.05);}100%{transform:scale(1);opacity:1;}}
+        .confetti-emoji{font-size:48px;display:block;margin-bottom:8px;animation:bounce 0.5s ease infinite alternate;}
+        @keyframes bounce{0%{transform:translateY(0);}100%{transform:translateY(-8px);}}
+
+        /* Goal stat row */
+        .stat-row{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.04);}
+        .stat-row:last-child{border-bottom:none;}
+        .stat-icon{font-size:18px;width:26px;text-align:center;flex-shrink:0;}
+        .stat-label{font-family:'DM Sans',sans-serif;font-size:12px;color:rgba(255,255,255,0.4);width:52px;flex-shrink:0;}
+        .stat-val{font-family:'Bebas Neue',sans-serif;font-size:20px;line-height:1;flex:1;}
+        .stat-val.hit{color:#4caf50;}
+        .stat-val.miss{color:rgba(255,255,255,0.5);}
+        .stat-goal{font-family:'DM Sans',sans-serif;font-size:11px;color:rgba(255,255,255,0.25);flex-shrink:0;}
+        .hit-check{font-size:14px;flex-shrink:0;}
       `}</style>
+
+      {/* CELEBRATION OVERLAY */}
+      {celebration && (
+        <div className="celeb-overlay">
+          {celebration.type === 'all4' ? (
+            <div className="celeb-all4">
+              <span className="confetti-emoji">🏆</span>
+              <div className="tf" style={{fontSize:32,color:"#FCC728",letterSpacing:1,marginBottom:4}}>PERFECT DAY!</div>
+              <div className="df" style={{fontSize:14,color:"rgba(255,255,255,0.6)"}}>{celebration.label} hit all 4 goals!</div>
+              <div style={{fontSize:28,marginTop:8}}>🎉🔥💪</div>
+            </div>
+          ) : (
+            <div className="celeb-single">
+              <div style={{fontSize:32,marginBottom:6}}>{celebration.label.split(' ')[0]}</div>
+              <div className="df" style={{fontSize:15,fontWeight:500,color:"#fff"}}>{celebration.label}</div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* HERO */}
       <div className="hero">
@@ -281,17 +353,17 @@ export default function App() {
               <div style={{marginBottom:20}}>
                 <div className="tf" style={{fontSize:28,letterSpacing:1,marginBottom:4}}>WHAT IS THIS?</div>
                 <div className="df" style={{fontSize:14,color:"rgba(255,255,255,0.6)",lineHeight:1.75}}>
-                  The <strong style={{color:"#FCC728"}}>90 Day Summer Strong Challenge</strong> is a friendly fitness competition running from <strong style={{color:"#fff"}}>{fmtDate(START_DATE)}</strong> to <strong style={{color:"#fff"}}>{fmtDate("2026-06-27")}</strong>.{"\n\n"}Every day you can earn up to <strong style={{color:"#FCC728"}}>4 points</strong> by hitting your personal health goals. The player with the most points after 90 days wins the pot.
+                  The <strong style={{color:"#FCC728"}}>90 Day Summer Strong Challenge</strong> is a friendly fitness competition running from <strong style={{color:"#fff"}}>{fmtDate(START_DATE)}</strong> to <strong style={{color:"#fff"}}>{fmtDate("2026-06-27")}</strong>.{"\n\n"}Every day you can earn up to <strong style={{color:"#FCC728"}}>4 points</strong> by hitting your personal health goals. Log your actual numbers each day — points are awarded automatically when you hit your goal.
                 </div>
               </div>
               <div className="info-divider"/>
               <div style={{marginBottom:20}}>
-                <div className="tf" style={{fontSize:24,letterSpacing:1,marginBottom:12}}>DAILY POINT GOALS</div>
+                <div className="tf" style={{fontSize:24,letterSpacing:1,marginBottom:12}}>DAILY GOALS</div>
                 {[
-                  {icon:"💧",label:"Water",desc:"Hit your personal daily oz goal"},
-                  {icon:"🥩",label:"Protein",desc:"Hit your personal daily gram goal"},
-                  {icon:"🟢",label:"Green Ring",desc:"30 minutes of exercise"},
-                  {icon:"🔴",label:"Red Ring",desc:"Hit your personal active calorie goal (min 500 cal)"},
+                  {icon:"💧",label:"Water",desc:"Log your oz — hit your personal goal"},
+                  {icon:"🥩",label:"Protein",desc:"Log your grams — hit your personal goal"},
+                  {icon:"🟢",label:"Green Ring",desc:"Log your exercise minutes — hit 30 min"},
+                  {icon:"🔴",label:"Red Ring",desc:"Log your active calories — hit your personal goal (min 500)"},
                 ].map(({icon,label,desc})=>(
                   <div key={label} style={{display:"flex",alignItems:"center",gap:12,marginBottom:10,background:"rgba(255,255,255,0.03)",borderRadius:10,padding:"12px 14px",border:"1px solid rgba(255,255,255,0.06)"}}>
                     <span style={{fontSize:22,flexShrink:0}}>{icon}</span>
@@ -321,7 +393,7 @@ export default function App() {
                     <div className="tf" style={{fontSize:20,color:"rgba(200,200,200,0.8)",letterSpacing:1}}>2ND PLACE</div>
                   </div>
                   <div className="tf" style={{fontSize:36,color:"rgba(200,200,200,0.7)",lineHeight:1}}>${second}</div>
-                  <div className="note" style={{marginTop:4}}>30% of the pot · grows as more players join</div>
+                  <div className="note" style={{marginTop:4}}>30% of the pot</div>
                 </div>
               </div>
               <div className="info-divider"/>
@@ -339,19 +411,15 @@ export default function App() {
               <div style={{marginBottom:20}}>
                 <div className="tf" style={{fontSize:24,letterSpacing:1,marginBottom:4}}>FIND YOUR GOALS</div>
                 <div className="df" style={{fontSize:13,color:"rgba(255,255,255,0.5)",marginBottom:14,lineHeight:1.6}}>
-                  Everyone's protein, water, and red ring targets are personalized. Copy this prompt into Claude or ChatGPT to calculate yours, then enter them when you join.
+                  Everyone's protein, water, and red ring targets are personalized. Copy this prompt into Claude or ChatGPT to calculate yours.
                 </div>
                 <div className="prompt-box">{AI_PROMPT}</div>
                 <div style={{textAlign:"center",marginTop:12}}>
-                  <button className={`copy-btn ${copied?"done":""}`} onClick={copyPrompt}>
-                    {copied?"✓ Copied!":"Copy Prompt"}
-                  </button>
+                  <button className={`copy-btn ${copied?"done":""}`} onClick={copyPrompt}>{copied?"✓ Copied!":"Copy Prompt"}</button>
                 </div>
               </div>
               <div className="info-divider"/>
-              <button className="btn-gold" onClick={()=>{setActiveTab("manage");setAddingUser(true);}}>
-                JOIN THE CHALLENGE 🔥
-              </button>
+              <button className="btn-gold" onClick={()=>{setActiveTab("manage");setAddingUser(true);}}>JOIN THE CHALLENGE 🔥</button>
               <div className="note" style={{textAlign:"center",marginTop:10}}>After joining, send $20 to {VENMO} on Venmo.</div>
             </div>
           )}
@@ -362,14 +430,13 @@ export default function App() {
               {participants.length===0?(
                 <div style={{textAlign:"center",padding:"60px 24px"}}>
                   <div className="sf" style={{fontSize:24,color:"rgba(255,255,255,0.5)",marginBottom:8}}>No players yet!</div>
-                  <div className="df" style={{fontSize:13,color:"rgba(255,255,255,0.3)",marginBottom:24}}>Check the Info tab to get started.</div>
                   <button className="btn-gold" style={{width:"auto",padding:"14px 32px"}} onClick={()=>setActiveTab("info")}>SEE INFO →</button>
                 </div>
               ):(
                 <>
                   <div style={{display:"flex",gap:8,padding:"10px 12px 0",justifyContent:"center"}}>
-                    {[["🥇","1st Place",first,"rgba(252,199,40,0.08)","rgba(252,199,40,0.18)","#FCC728"],
-                      ["🥈","2nd Place",second,"rgba(192,192,192,0.06)","rgba(192,192,192,0.14)","rgba(200,200,200,0.7)"],
+                    {[["🥇","1st",first,"rgba(252,199,40,0.08)","rgba(252,199,40,0.18)","#FCC728"],
+                      ["🥈","2nd",second,"rgba(192,192,192,0.06)","rgba(192,192,192,0.14)","rgba(200,200,200,0.7)"],
                       ["💰","Pot",pot,"rgba(255,255,255,0.03)","rgba(255,255,255,0.07)","rgba(255,255,255,0.6)"]
                     ].map(([icon,label,val,bg,border,color])=>(
                       <div key={label} style={{flex:1,background:bg,border:`1px solid ${border}`,borderRadius:10,padding:"10px 8px",textAlign:"center"}}>
@@ -378,24 +445,26 @@ export default function App() {
                       </div>
                     ))}
                   </div>
+
                   {sorted.map((p,i)=>{
-                    const pts=calcPoints(p.id);
-                    const pct=Math.round((pts/MAX_PER_PERSON)*100);
-                    const todayPts=FIELDS.filter(f=>getEntry(today,p.id,f)).length;
-                    return(
-                      <div key={p.id} className="card" style={{borderTop:`3px solid ${p.color}`}}>
+                    const pts = calcPoints(p.id);
+                    const pct = Math.round((pts/MAX_PER_PERSON)*100);
+                    const todayInp = getInput(today, p.id);
+                    const todayHit = goalsHit(todayInp, p.goals);
+                    const todayCount = countHit(todayInp, p.goals);
+                    const allHitToday = todayCount === 4;
+
+                    return (
+                      <div key={p.id} className="card" style={{borderTop:`3px solid ${p.color}`, position:"relative"}}>
+                        {allHitToday && (
+                          <div style={{position:"absolute",top:12,right:14,fontSize:18}}>🏆</div>
+                        )}
                         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
                           <div style={{display:"flex",alignItems:"flex-start",gap:10}}>
                             <div className="tf" style={{fontSize:34,lineHeight:1,color:i===0?"#FCC728":i===1?"rgba(200,200,200,0.5)":"rgba(255,255,255,0.12)",marginTop:2}}>#{i+1}</div>
                             <div>
                               <div className="tf" style={{fontSize:26,letterSpacing:0.8,color:"#fff"}}>{p.name}</div>
-                              <div className="note">{p.goals.protein}g · {p.goals.water}oz · {p.goals.red}cal</div>
-                              {hasStarted&&(
-                                <div style={{marginTop:4,display:"flex",gap:4,alignItems:"center"}}>
-                                  {FIELDS.map(f=><span key={f} style={{fontSize:13,opacity:getEntry(today,p.id,f)?1:0.18}}>{FIELD_META[f].icon}</span>)}
-                                  <span className="note" style={{marginLeft:4,fontSize:10}}>{todayPts}/4 today</span>
-                                </div>
-                              )}
+                              <div className="note">{p.goals.protein}g · {p.goals.water}oz · 30min · {p.goals.red}cal</div>
                             </div>
                           </div>
                           <div style={{textAlign:"right",flexShrink:0}}>
@@ -404,26 +473,40 @@ export default function App() {
                           </div>
                         </div>
                         <div className="bar-bg"><div className="bar-fill" style={{width:`${pct}%`,background:`linear-gradient(90deg,${p.color}77,${p.color})`}}/></div>
-                        <div className="note" style={{marginTop:5}}>{pct}% complete</div>
+                        <div className="note" style={{marginTop:5,marginBottom:12}}>{pct}% complete</div>
+
+                        {/* Today's stats */}
+                        {hasStarted && (
+                          <div style={{borderTop:"1px solid rgba(255,255,255,0.06)",paddingTop:12}}>
+                            <div className="df" style={{fontSize:10,letterSpacing:2,textTransform:"uppercase",color:"rgba(255,255,255,0.2)",marginBottom:8}}>
+                              Today{currentDayNum ? ` — Day ${currentDayNum}` : ""}
+                            </div>
+                            <div>
+                              {[
+                                {icon:"💧",key:"water",val:todayInp?.water_oz,goal:p.goals.water,unit:"oz",hit:todayHit.water},
+                                {icon:"🥩",key:"protein",val:todayInp?.protein_g,goal:p.goals.protein,unit:"g",hit:todayHit.protein},
+                                {icon:"🟢",key:"green",val:todayInp?.exercise_min,goal:30,unit:"min",hit:todayHit.green},
+                                {icon:"🔴",key:"red",val:todayInp?.calories,goal:p.goals.red,unit:"cal",hit:todayHit.red},
+                              ].map(({icon,key,val,goal,unit,hit})=>(
+                                <div key={key} className="stat-row">
+                                  <span className="stat-icon">{icon}</span>
+                                  <span className="stat-label df">{unit}</span>
+                                  <span className={`stat-val ${val!=null&&val>0?(hit?"hit":"miss"):"miss"}`}>
+                                    {val!=null&&val>0 ? val : "—"}
+                                  </span>
+                                  <span className="stat-goal">/ {goal}{unit}</span>
+                                  <span className="hit-check">{hit?"✅":"　"}</span>
+                                </div>
+                              ))}
+                            </div>
+                            <button className="log-btn" style={{marginTop:10,width:"100%"}} onClick={()=>openDayLog(p.id)}>
+                              {todayInp ? "✏️ Update Today's Log" : "➕ Log Today"}
+                            </button>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
-                  <div style={{margin:"6px 12px 0"}}>
-                    <div className="df" style={{fontSize:10,letterSpacing:2.5,textTransform:"uppercase",color:"rgba(255,255,255,0.18)",marginBottom:10,paddingLeft:2}}>
-                      {hasStarted&&currentDayNum?`Log Today — Day ${currentDayNum}`:`Starts ${fmtDate(START_DATE)}`}
-                    </div>
-                    <div style={{background:"rgba(255,255,255,0.025)",border:"1px solid rgba(252,199,40,0.1)",borderRadius:12,padding:"14px"}}>
-                      {participants.map(p=>(
-                        <div key={p.id} style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
-                          <div style={{width:7,height:7,borderRadius:"50%",background:p.color,flexShrink:0}}/>
-                          <span className="df" style={{fontSize:13,color:"rgba(255,255,255,0.5)",width:80,flexShrink:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</span>
-                          <div style={{display:"flex",gap:6}}>
-                            {FIELDS.map(f=><CB key={f} field={f} checked={getEntry(today,p.id,f)} disabled={!hasStarted||saving} onClick={()=>toggleEntry(today,p.id,f)}/>)}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
                 </>
               )}
             </div>
@@ -444,22 +527,44 @@ export default function App() {
                         style={{border:`1.5px solid ${logPerson===p.id?p.color:"rgba(255,255,255,0.1)"}`,background:logPerson===p.id?`${p.color}22`:"transparent",color:logPerson===p.id?p.color:"rgba(255,255,255,0.4)"}}>{p.name}</button>
                     ))}
                   </div>
-                  <div className="note" style={{padding:"0 12px 8px",fontSize:10}}>💧 water · 🥩 protein · 🟢 green · 🔴 red</div>
+
                   {days.map((date,i)=>{
-                    const isToday=date===today,isFuture=date>today;
+                    const isToday=date===today, isFuture=date>today;
                     const activePlayers=logPerson?participants.filter(p=>p.id===logPerson):participants;
                     return(
-                      <div key={date} className={`day-row${isToday?" tr":""}`} style={{opacity:isFuture?0.25:1}}>
-                        <div className="tf" style={{fontSize:17,color:isToday?"#FCC728":"rgba(255,255,255,0.16)",width:28,flexShrink:0,textAlign:"center"}}>{i+1}</div>
-                        <div style={{display:"flex",gap:10,overflowX:"auto",flex:1,alignItems:"center"}}>
-                          {activePlayers.map(p=>(
-                            <div key={p.id} style={{display:"flex",gap:4,alignItems:"center",flexShrink:0}}>
-                              <div style={{width:5,height:5,borderRadius:"50%",background:p.color,flexShrink:0}}/>
-                              {FIELDS.map(f=><CB key={f} field={f} checked={getEntry(date,p.id,f)} disabled={isFuture||saving} onClick={()=>!isFuture&&toggleEntry(date,p.id,f)}/>)}
-                            </div>
-                          ))}
+                      <div key={date} style={{opacity:isFuture?0.25:1,borderBottom:"1px solid rgba(255,255,255,0.03)",padding:"8px 12px",background:isToday?"rgba(252,199,40,0.03)":"transparent",borderLeft:isToday?"3px solid #FCC728":"3px solid transparent"}}>
+                        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:activePlayers.length>0?6:0}}>
+                          <div className="tf" style={{fontSize:17,color:isToday?"#FCC728":"rgba(255,255,255,0.16)",width:28,textAlign:"center"}}>{i+1}</div>
+                          <div className="df" style={{fontSize:10,color:"rgba(255,255,255,0.2)"}}>
+                            {new Date(date+"T12:00:00").toLocaleDateString("en-US",{month:"short",day:"numeric"})}
+                          </div>
+                          {isToday&&<span style={{fontSize:9,color:"#FCC728",fontFamily:"DM Sans",marginLeft:"auto",letterSpacing:1}}>TODAY</span>}
                         </div>
-                        {isToday&&<span style={{fontSize:9,color:"#FCC728",fontFamily:"DM Sans",flexShrink:0,letterSpacing:1}}>TODAY</span>}
+                        {activePlayers.map(p=>{
+                          const inp = getInput(date, p.id);
+                          const hit = goalsHit(inp, p.goals);
+                          const total = countHit(inp, p.goals);
+                          return(
+                            <div key={p.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 0 6px 36px"}}>
+                              <div style={{width:6,height:6,borderRadius:"50%",background:p.color,flexShrink:0}}/>
+                              <span className="df" style={{fontSize:12,color:"rgba(255,255,255,0.4)",width:60,flexShrink:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</span>
+                              <div style={{display:"flex",gap:6,flex:1,flexWrap:"wrap"}}>
+                                {[
+                                  {icon:"💧",val:inp?.water_oz,unit:"oz",h:hit.water},
+                                  {icon:"🥩",val:inp?.protein_g,unit:"g",h:hit.protein},
+                                  {icon:"🟢",val:inp?.exercise_min,unit:"m",h:hit.green},
+                                  {icon:"🔴",val:inp?.calories,unit:"cal",h:hit.red},
+                                ].map(({icon,val,unit,h},idx)=>(
+                                  <div key={idx} style={{display:"flex",alignItems:"center",gap:2,background:h?"rgba(76,175,80,0.1)":"rgba(255,255,255,0.04)",border:`1px solid ${h?"rgba(76,175,80,0.3)":"rgba(255,255,255,0.07)"}`,borderRadius:6,padding:"3px 7px"}}>
+                                    <span style={{fontSize:11}}>{icon}</span>
+                                    <span className="df" style={{fontSize:11,color:h?"#4caf50":"rgba(255,255,255,0.4)",fontWeight:500}}>{val!=null&&val>0?`${val}${unit}`:"—"}</span>
+                                  </div>
+                                ))}
+                              </div>
+                              <div className="tf" style={{fontSize:16,color:p.color,flexShrink:0}}>{total}pt</div>
+                            </div>
+                          );
+                        })}
                       </div>
                     );
                   })}
@@ -473,15 +578,14 @@ export default function App() {
             <div style={{padding:"22px 18px 80px"}}>
               <div className="tf" style={{fontSize:30,letterSpacing:1,marginBottom:18}}>CHALLENGE RULES</div>
               {[
-                {icon:"💧",title:"Water",body:"Hit your personal daily oz goal = 1 point."},
-                {icon:"🥩",title:"Protein",body:"Hit your personal daily gram goal = 1 point."},
-                {icon:"🟢",title:"Green Ring",body:"30 minutes of exercise = 1 point. Everyone."},
-                {icon:"🔴",title:"Red Ring",body:"Hit your personal active calorie goal\n(minimum 500 cal) = 1 point."},
-                {icon:"🏆",title:"Scoring",body:"Max 4 points per day.\n360 points over 90 days.\nHighest score wins."},
-                {icon:"💰",title:"Buy In",body:`$20 via Venmo to ${VENMO}\nSend before the start date to lock in your spot.`},
+                {icon:"💧",title:"Water",body:"Log your daily oz. Hit your personal goal = 1 point."},
+                {icon:"🥩",title:"Protein",body:"Log your daily grams. Hit your personal goal = 1 point."},
+                {icon:"🟢",title:"Green Ring",body:"Log your exercise minutes. Hit 30 min = 1 point."},
+                {icon:"🔴",title:"Red Ring",body:"Log your active calories.\nHit your personal goal (min 500 cal) = 1 point."},
+                {icon:"🏆",title:"Scoring",body:"Points are awarded automatically when you hit your goal.\nMax 4 points per day · 360 points over 90 days."},
+                {icon:"💰",title:"Buy In",body:`$20 via Venmo to ${VENMO}\nSend before the start date.`},
                 {icon:"🥇",title:"Prizes",body:"1st place: 70% of the pot\n2nd place: 30% of the pot"},
                 {icon:"📅",title:"Duration",body:`${fmtDate(START_DATE)} → ${fmtDate("2026-06-27")}`},
-                {icon:"🌐",title:"Tracking",body:"This scoreboard is live and shared.\nEveryone logs their own points in real time from any device."},
               ].map(({icon,title,body})=>(
                 <div key={title} style={{marginBottom:16,borderBottom:"1px solid rgba(255,255,255,0.05)",paddingBottom:16}}>
                   <div style={{display:"flex",gap:12,alignItems:"flex-start"}}>
@@ -508,7 +612,7 @@ export default function App() {
                     <div style={{width:9,height:9,borderRadius:"50%",background:p.color,flexShrink:0}}/>
                     <div style={{flex:1,minWidth:0}}>
                       <div className="tf" style={{fontSize:20,letterSpacing:0.5}}>{p.name}</div>
-                      <div className="note">{p.goals.protein}g · {p.goals.water}oz · {p.goals.red}cal · <span style={{color:p.color}}>{pts} pts</span></div>
+                      <div className="note">{p.goals.protein}g · {p.goals.water}oz · 30min · {p.goals.red}cal · <span style={{color:p.color}}>{pts} pts</span></div>
                     </div>
                     <button onClick={()=>removeParticipant(p.id)} disabled={saving} style={{background:"none",border:"1px solid rgba(255,255,255,0.09)",color:"rgba(255,255,255,0.28)",borderRadius:8,padding:"5px 11px",cursor:"pointer",fontFamily:"DM Sans",fontSize:11,flexShrink:0}}>Remove</button>
                   </div>
@@ -556,7 +660,7 @@ export default function App() {
                     </div>
                   </div>
                 ))}
-                <div className="note" style={{marginBottom:16,lineHeight:1.6}}>🟢 Green ring is fixed for everyone: 30 min exercise.</div>
+                <div className="note" style={{marginBottom:16,lineHeight:1.6}}>🟢 Green ring goal is fixed for everyone: 30 min exercise.</div>
                 <div style={{display:"flex",gap:10}}>
                   <button className="btn-ghost" onClick={()=>setStep(1)}>← Back</button>
                   <button className="btn-gold" onClick={addParticipant} disabled={saving}>{saving?"Saving…":"JOIN 🔥"}</button>
@@ -566,16 +670,85 @@ export default function App() {
           </div>
         </div>
       )}
-    </div>
-  );
-}
 
-function CB({field,checked,onClick,disabled}){
-  const map={water:"cw",protein:"cp",green:"cg",red:"cr"};
-  const icons={water:"💧",protein:"🥩",green:"🟢",red:"🔴"};
-  return(
-    <button className={`cbtn ${checked?map[field]:""}`} onClick={onClick} disabled={disabled}>
-      {checked?icons[field]:<span style={{fontSize:10,color:"rgba(255,255,255,0.12)"}}>·</span>}
-    </button>
+      {/* ── DAY LOG MODAL ── */}
+      {activeDayLog&&(()=>{
+        const p = participants.find(x=>x.id===activeDayLog);
+        if (!p) return null;
+        const preview = {
+          water_oz: parseFloat(draftInputs.water_oz)||0,
+          protein_g: parseFloat(draftInputs.protein_g)||0,
+          exercise_min: parseFloat(draftInputs.exercise_min)||0,
+          calories: parseFloat(draftInputs.calories)||0,
+        };
+        const previewHit = goalsHit(preview, p.goals);
+        const previewCount = countHit(preview, p.goals);
+        return(
+          <div className="modal-bg" onClick={e=>{if(e.target===e.currentTarget)setActiveDayLog(null);}}>
+            <div className="modal" style={{maxHeight:"90vh",overflowY:"auto"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:4}}>
+                <div className="tf" style={{fontSize:26,letterSpacing:1}}>LOG TODAY</div>
+                <div className="tf" style={{fontSize:20,color:p.color}}>{p.name}</div>
+              </div>
+              <div className="df" style={{fontSize:11,color:"rgba(255,255,255,0.3)",marginBottom:20}}>
+                {currentDayNum ? `Day ${currentDayNum} · ` : ""}{fmtDate(today)}
+              </div>
+
+              {/* Live points preview */}
+              <div style={{display:"flex",gap:8,marginBottom:20,background:"rgba(255,255,255,0.03)",borderRadius:12,padding:"12px 16px",border:"1px solid rgba(255,255,255,0.07)"}}>
+                <div className="tf" style={{fontSize:36,color:p.color,lineHeight:1}}>{previewCount}</div>
+                <div style={{flex:1}}>
+                  <div className="df" style={{fontSize:11,color:"rgba(255,255,255,0.3)"}}>points today</div>
+                  <div style={{display:"flex",gap:4,marginTop:4}}>
+                    {[previewHit.water,previewHit.protein,previewHit.green,previewHit.red].map((h,i)=>(
+                      <div key={i} style={{width:20,height:4,borderRadius:2,background:h?"#4caf50":"rgba(255,255,255,0.1)",transition:"background 0.2s"}}/>
+                    ))}
+                  </div>
+                </div>
+                {previewCount===4&&<div style={{fontSize:24}}>🏆</div>}
+              </div>
+
+              {[
+                {key:"water_oz",icon:"💧",label:"Water",unit:"oz",goal:p.goals.water,hit:previewHit.water},
+                {key:"protein_g",icon:"🥩",label:"Protein",unit:"grams",goal:p.goals.protein,hit:previewHit.protein},
+                {key:"exercise_min",icon:"🟢",label:"Exercise",unit:"minutes",goal:30,hit:previewHit.green},
+                {key:"calories",icon:"🔴",label:"Active Calories",unit:"cal",goal:p.goals.red,hit:previewHit.red},
+              ].map(({key,icon,label,unit,goal,hit})=>(
+                <div key={key} style={{marginBottom:16}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                    <div className="df" style={{fontSize:13,color:"rgba(255,255,255,0.6)",display:"flex",alignItems:"center",gap:6}}>
+                      <span style={{fontSize:18}}>{icon}</span> {label}
+                    </div>
+                    <div style={{display:"flex",alignItems:"center",gap:6}}>
+                      <div className="note">Goal: {goal} {unit}</div>
+                      {hit&&<span style={{fontSize:14}}>✅</span>}
+                    </div>
+                  </div>
+                  <input
+                    className={`num-inp ${hit?"hit":""}`}
+                    type="number"
+                    placeholder={`Enter ${unit}…`}
+                    value={draftInputs[key]}
+                    onChange={e=>setDraftInputs(d=>({...d,[key]:e.target.value}))}
+                  />
+                  {hit&&(
+                    <div className="df" style={{fontSize:11,color:"#4caf50",marginTop:4}}>
+                      ✓ Goal hit! +1 point
+                    </div>
+                  )}
+                </div>
+              ))}
+
+              <div style={{display:"flex",gap:10,marginTop:8}}>
+                <button className="btn-ghost" onClick={()=>setActiveDayLog(null)}>Cancel</button>
+                <button className="btn-gold" onClick={()=>saveDayLog(activeDayLog)} disabled={saving}>
+                  {saving?"Saving…":"SAVE 💾"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+    </div>
   );
 }
