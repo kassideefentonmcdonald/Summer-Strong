@@ -9,9 +9,9 @@ const BUYIN = 20;
 const VENMO = "@Kassidee-McDonald";
 const VENMO_URL = "https://venmo.com/Kassidee-McDonald";
 
-// Signup closes at midnight Pacific Time on March 31, 2026
-// Midnight PT = 08:00 UTC
-const SIGNUP_CUTOFF = new Date("2026-03-31T08:00:00Z");
+// Signup closes at 11:59 PM Pacific Daylight Time on March 30, 2026
+// 11:59 PM PDT = 06:59 UTC March 31
+const SIGNUP_CUTOFF = new Date("2026-03-31T06:59:00Z");
 function signupOpen() { return new Date() < SIGNUP_CUTOFF; }
 
 const AI_PROMPT = `I want to join a 90-day fitness challenge and need help setting my daily goals. Here's my info:
@@ -29,7 +29,10 @@ Please calculate:
 
 Keep it simple — just give me the three numbers and a one-line explanation of how you got each one.`;
 
-function todayStr() { return new Date().toISOString().split("T")[0]; }
+// Get today's date in Pacific Time
+function todayStr() {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
+}
 function getDayNumber(dateStr) {
   const diff = Math.floor((new Date(dateStr) - new Date(START_DATE)) / 86400000) + 1;
   return diff >= 1 && diff <= TOTAL_DAYS ? diff : null;
