@@ -301,7 +301,7 @@ function formatText(text) {
     .replace(/\*(.*?)\*/g, '<em>$1</em>')
     .replace(/^- (.+)/gm, '<li>$1</li>')
     .replace(/(<li>[\s\S]*<\/li>)/, '<ul>$1</ul>')
-    .replace(/\n/g, '<br>');
+    .replace(/\n\n/g, '<br>');
 }
 
 /* ─── SEND ─── */
