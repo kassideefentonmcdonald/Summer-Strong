@@ -8,7 +8,9 @@
 // 2. Place this file at:  /api/chat.js  in your project root
 // 3. Deploy — Vercel auto-detects files in /api as serverless functions
 // ─────────────────────────────────────────────────────────────────────────
-
+export const config = {
+  maxDuration: 60,
+};
 export default async function handler(req, res) {
   // Only allow POST
   if (req.method !== 'POST') {
