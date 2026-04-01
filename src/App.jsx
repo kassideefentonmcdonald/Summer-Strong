@@ -9,9 +9,9 @@ const BUYIN = 20;
 const VENMO = "@Kassidee-McDonald";
 const VENMO_URL = "https://venmo.com/Kassidee-McDonald";
 
-// Signup closes at 11:59 PM Pacific Daylight Time on March 30, 2026
-// 11:59 PM PDT = 06:59 UTC March 31
-const SIGNUP_CUTOFF = new Date("2026-03-31T06:59:00Z");
+// Signup closes at 8:00 AM Pacific Time on April 1, 2026
+// 8:00 AM PDT = 15:00 UTC
+const SIGNUP_CUTOFF = new Date("2026-04-01T15:00:00Z");
 function signupOpen() { return new Date() < SIGNUP_CUTOFF; }
 
 const AI_PROMPT = `I want to join a 90-day fitness challenge and need help setting my daily goals. Here's my info:
@@ -125,6 +125,28 @@ export default function App() {
     return pts;
   };
 
+  // Average % over goal across all 4 categories, capped at 200% per category per day
+  // Only counts days where something was logged
+  const calcExcess = (personId) => {
+    const p = participants.find(x => x.id === personId);
+    if (!p) return 0;
+    let totalPct = 0;
+    let loggedDays = 0;
+    Object.values(inputs).forEach(dayInputs => {
+      const inp = dayInputs?.[personId];
+      if (!inp) return;
+      const hasAny = (inp.water_oz||0)>0 || (inp.protein_g||0)>0 || (inp.exercise_min||0)>0 || (inp.calories||0)>0;
+      if (!hasAny) return;
+      loggedDays++;
+      const waterPct  = Math.min((inp.water_oz    || 0) / (p.goals.water   || 1) * 100, 200);
+      const protPct   = Math.min((inp.protein_g   || 0) / (p.goals.protein || 1) * 100, 200);
+      const greenPct  = Math.min((inp.exercise_min|| 0) / 30 * 100, 200);
+      const redPct    = Math.min((inp.calories    || 0) / (p.goals.red     || 500) * 100, 200);
+      totalPct += (waterPct + protPct + greenPct + redPct) / 4;
+    });
+    return loggedDays > 0 ? Math.round(totalPct / loggedDays) : 0;
+  };
+
   // Best streak for a person
   const calcStreak = (personId) => {
     const p = participants.find(x => x.id === personId);
@@ -216,7 +238,11 @@ export default function App() {
     setSaving(false);
   };
 
-  const sorted = [...participants].sort((a,b) => calcPoints(b.id) - calcPoints(a.id));
+  const sorted = [...participants].sort((a,b) => {
+    const ptsDiff = calcPoints(b.id) - calcPoints(a.id);
+    if (ptsDiff !== 0) return ptsDiff;
+    return calcExcess(b.id) - calcExcess(a.id); // tiebreaker: avg % over goal
+  });
   const pot = participants.length * BUYIN;
   const first = Math.floor(pot * 0.7);
   const second = Math.floor(pot * 0.3);
@@ -471,7 +497,7 @@ export default function App() {
                 <div style={{background:"rgba(125,48,49,0.12)",border:"1px solid rgba(125,48,49,0.3)",borderRadius:14,padding:"20px 16px",textAlign:"center"}}>
                   <div style={{fontSize:28,marginBottom:8}}>🔒</div>
                   <div className="tf" style={{fontSize:24,letterSpacing:1,color:"#c04a4c",marginBottom:6}}>REGISTRATION CLOSED</div>
-                  <div className="df" style={{fontSize:13,color:"rgba(255,255,255,0.45)",lineHeight:1.6}}>Sign-ups closed at midnight PT on March 31.<br/>The challenge is underway — check back next time!</div>
+                  <div className="df" style={{fontSize:13,color:"rgba(255,255,255,0.45)",lineHeight:1.6}}>Sign-ups closed at 8:00 AM PT on April 1.<br/>The challenge is underway — check back next time!</div>
                 </div>
               )}
             </div>
@@ -522,9 +548,9 @@ export default function App() {
                       const pts = calcPoints(p.id);
                       const pct = Math.round((pts/MAX_PER_PERSON)*100);
                       const streak = calcStreak(p.id);
+                      const excess = calcExcess(p.id);
                       const todayInp = getInput(today, p.id);
                       const todayHit = goalsHit(todayInp, p.goals);
-                      const todayCount = countHit(todayInp, p.goals);
                       const isMe = p.id === activeUser;
                       const rankColor = i===0?"#FCC728":i===1?"rgba(200,200,200,0.6)":i===2?"rgba(205,127,50,0.7)":"rgba(255,255,255,0.15)";
                       return(
@@ -535,10 +561,18 @@ export default function App() {
                               <div style={{width:7,height:7,borderRadius:"50%",background:p.color,flexShrink:0}}/>
                               <div className="lb-name">{p.name}{isMe&&<span className="df" style={{fontSize:9,color:"rgba(252,199,40,0.5)",marginLeft:6,letterSpacing:1,fontWeight:600}}>YOU</span>}</div>
                             </div>
-                            <div style={{display:"flex",gap:8,alignItems:"center",marginTop:2}}>
+                            <div style={{display:"flex",gap:6,alignItems:"center",marginTop:2,flexWrap:"wrap"}}>
                               <div className="lb-sub">{streak>0?`🔥 ${streak} day streak`:"No streak yet"}</div>
                               <div className="lb-sub">·</div>
                               <div className="lb-sub">{pct}% complete</div>
+                              {excess>0&&(
+                                <>
+                                  <div className="lb-sub">·</div>
+                                  <div className="lb-sub" style={{color:excess>=150?"#4caf50":excess>=110?"#FCC728":"rgba(255,255,255,0.3)"}}>
+                                    {excess>=100?`🚀 ${excess}% avg`:`${excess}% avg`}
+                                  </div>
+                                </>
+                              )}
                             </div>
                             {hasStarted&&(
                               <div className="today-pills">
@@ -707,7 +741,7 @@ export default function App() {
               ) : (
                 <div style={{background:"rgba(125,48,49,0.1)",border:"1px solid rgba(125,48,49,0.25)",borderRadius:12,padding:"16px",textAlign:"center",marginTop:10}}>
                   <div className="tf" style={{fontSize:20,color:"#c04a4c",letterSpacing:1,marginBottom:4}}>🔒 REGISTRATION CLOSED</div>
-                  <div className="note">Sign-ups closed at midnight PT on March 31.</div>
+                  <div className="note">Sign-ups closed at 8:00 AM PT on April 1.</div>
                 </div>
               )}
             </div>
