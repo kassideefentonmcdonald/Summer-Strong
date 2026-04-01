@@ -174,7 +174,7 @@
   </div>
 
   <div id="input-bar">
-    <input type="file" id="file-input" accept="image/*" capture="environment" onchange="handleFileSelect(event)" />
+    <input type="file" id="file-input" accept="image/*" onchange="handleFileSelect(event)" />
     <button id="photo-btn" onclick="document.getElementById('file-input').click()" title="Attach photo">📷</button>
     <textarea id="msg-input" placeholder="Ask your trainer anything… or snap a food photo!" rows="1"></textarea>
     <button id="send-btn" onclick="sendMessage()">
