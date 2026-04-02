@@ -9,9 +9,9 @@ const BUYIN = 20;
 const VENMO = "@Kassidee-McDonald";
 const VENMO_URL = "https://venmo.com/Kassidee-McDonald";
 
-// Signup closes at 8:00 AM Pacific Time on April 2, 2026
-// 8:00 AM PDT = 15:00 UTC
-const SIGNUP_CUTOFF = new Date("2026-04-02T15:00:00Z");
+// Signup closes at 2:00 PM Pacific Time on April 2, 2026
+// 2:00 PM PDT = 21:00 UTC
+const SIGNUP_CUTOFF = new Date("2026-04-02T21:00:00Z");
 function signupOpen() { return new Date() < SIGNUP_CUTOFF; }
 
 const AI_PROMPT = `I want to join a 90-day fitness challenge and need help setting my daily goals. Here's my info:
@@ -497,7 +497,7 @@ export default function App() {
                 <div style={{background:"rgba(125,48,49,0.12)",border:"1px solid rgba(125,48,49,0.3)",borderRadius:14,padding:"20px 16px",textAlign:"center"}}>
                   <div style={{fontSize:28,marginBottom:8}}>🔒</div>
                   <div className="tf" style={{fontSize:24,letterSpacing:1,color:"#c04a4c",marginBottom:6}}>REGISTRATION CLOSED</div>
-                  <div className="df" style={{fontSize:13,color:"rgba(255,255,255,0.45)",lineHeight:1.6}}>Sign-ups closed at 8:00 AM PT on April 2.<br/>The challenge is underway — check back next time!</div>
+                  <div className="df" style={{fontSize:13,color:"rgba(255,255,255,0.45)",lineHeight:1.6}}>Sign-ups closed at 2:00 PM PT on April 2.<br/>The challenge is underway — check back next time!</div>
                 </div>
               )}
             </div>
@@ -741,7 +741,7 @@ export default function App() {
               ) : (
                 <div style={{background:"rgba(125,48,49,0.1)",border:"1px solid rgba(125,48,49,0.25)",borderRadius:12,padding:"16px",textAlign:"center",marginTop:10}}>
                   <div className="tf" style={{fontSize:20,color:"#c04a4c",letterSpacing:1,marginBottom:4}}>🔒 REGISTRATION CLOSED</div>
-                  <div className="note">Sign-ups closed at 8:00 AM PT on April 2.</div>
+                  <div className="note">Sign-ups closed at 2:00 PM PT on April 2.</div>
                 </div>
               )}
             </div>
@@ -873,4 +873,3 @@ export default function App() {
     </div>
   );
 }
-
