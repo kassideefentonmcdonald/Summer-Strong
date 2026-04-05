@@ -727,7 +727,7 @@ export default function App() {
                             <span style={{fontSize:18,width:24,flexShrink:0}}>{icon}</span>
                             <span className="tf" style={{fontSize:24,color:h?"#4caf50":"rgba(255,255,255,0.45)",lineHeight:1}}>{val&&val>0?val:"—"}</span>
                             <span className="note" style={{flex:1,marginLeft:4}}>/ {goal}{unit}</span>
-                            <span style={{fontSize:14}}>{h?"✅":"⬜"}</span>
+                            <span style={{fontSize:14,width:20,textAlign:"center"}}>{h?"✅":""}</span>
                           </div>
                         ))}
                         <button style={{marginTop:14,width:"100%",background:"rgba(252,199,40,0.1)",border:"1px solid rgba(252,199,40,0.25)",borderRadius:10,padding:"11px",fontFamily:"DM Sans",fontSize:13,fontWeight:600,color:"#FCC728",cursor:"pointer"}}
