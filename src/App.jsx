@@ -8,11 +8,9 @@ const COLORS = ["#c04a4c","#FCC728","#4ab0f5","#4caf50","#b57bee","#f0944d","#e5
 const BUYIN = 20;
 const VENMO = "@Kassidee-McDonald";
 const VENMO_URL = "https://venmo.com/Kassidee-McDonald";
-
-// Signup closes at 2:00 PM Pacific Time on April 2, 2026
-// 2:00 PM PDT = 21:00 UTC
 const SIGNUP_CUTOFF = new Date("2026-04-02T21:00:00Z");
 function signupOpen() { return new Date() < SIGNUP_CUTOFF; }
+const DAY_LABELS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
 
 const AI_PROMPT = `I want to join a 90-day fitness challenge and need help setting my daily goals. Here's my info:
 
@@ -29,7 +27,6 @@ Please calculate:
 
 Keep it simple — just give me the three numbers and a one-line explanation of how you got each one.`;
 
-// Get today's date in Pacific Time
 function todayStr() {
   return new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
 }
@@ -64,6 +61,23 @@ function countHit(input, goals) {
   return Object.values(goalsHit(input, goals)).filter(Boolean).length;
 }
 
+// Build Mon–Sun weeks from allDays array
+function buildWeeks(days) {
+  const weeks = [];
+  if (!days.length) return weeks;
+  const firstDate = new Date(days[0] + "T12:00:00");
+  const firstDow = firstDate.getDay(); // 0=Sun
+  const mondayOffset = firstDow === 0 ? 6 : firstDow - 1;
+  let week = Array(mondayOffset).fill(null);
+  for (const dateStr of days) {
+    week.push(dateStr);
+    if (week.length === 7) { weeks.push(week); week = []; }
+  }
+  while (week.length > 0 && week.length < 7) week.push(null);
+  if (week.length === 7) weeks.push(week);
+  return weeks;
+}
+
 export default function App() {
   const [participants, setParticipants] = useState([]);
   const [inputs, setInputs] = useState({});
@@ -77,15 +91,26 @@ export default function App() {
   const [lastSync, setLastSync] = useState(null);
   const [copied, setCopied] = useState(false);
   const [celebration, setCelebration] = useState(null);
-  const [activeDayLog, setActiveDayLog] = useState(null); // date string being logged
+  const [activeDayLog, setActiveDayLog] = useState(null);
   const [draftInputs, setDraftInputs] = useState({});
   const [activeUser, setActiveUser] = useState(() => localStorage.getItem("ss-active-user") || null);
   const [showUserPicker, setShowUserPicker] = useState(false);
+  const [logHinted, setLogHinted] = useState(false);
+  const [expandedDay, setExpandedDay] = useState(null);
+  const [visibleWeek, setVisibleWeek] = useState(0);
   const celebTimerRef = useRef(null);
   const today = todayStr();
   const days = buildDays();
   const hasStarted = today >= START_DATE;
   const currentDayNum = getDayNumber(today);
+  const weeks = buildWeeks(days);
+  const todayWeekIdx = weeks.findIndex(w => w.includes(today));
+
+  // Init visibleWeek and expandedDay to today
+  useEffect(() => {
+    if (todayWeekIdx >= 0) setVisibleWeek(todayWeekIdx);
+    if (hasStarted) setExpandedDay(today);
+  }, [todayWeekIdx, today, hasStarted]);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -119,41 +144,35 @@ export default function App() {
     const p = participants.find(x => x.id === personId);
     if (!p) return 0;
     let pts = 0;
-    Object.values(inputs).forEach(dayInputs => {
-      pts += countHit(dayInputs?.[personId], p.goals);
-    });
+    Object.values(inputs).forEach(dayInputs => { pts += countHit(dayInputs?.[personId], p.goals); });
     return pts;
   };
 
-  // Average % over goal across all 4 categories, capped at 200% per category per day
-  // Only counts days where something was logged
   const calcExcess = (personId) => {
     const p = participants.find(x => x.id === personId);
     if (!p) return 0;
-    let totalPct = 0;
-    let loggedDays = 0;
+    let totalPct = 0, loggedDays = 0;
     Object.values(inputs).forEach(dayInputs => {
       const inp = dayInputs?.[personId];
       if (!inp) return;
-      const hasAny = (inp.water_oz||0)>0 || (inp.protein_g||0)>0 || (inp.exercise_min||0)>0 || (inp.calories||0)>0;
+      const hasAny = (inp.water_oz||0)>0||(inp.protein_g||0)>0||(inp.exercise_min||0)>0||(inp.calories||0)>0;
       if (!hasAny) return;
       loggedDays++;
-      const waterPct  = Math.min((inp.water_oz    || 0) / (p.goals.water   || 1) * 100, 200);
-      const protPct   = Math.min((inp.protein_g   || 0) / (p.goals.protein || 1) * 100, 200);
-      const greenPct  = Math.min((inp.exercise_min|| 0) / 30 * 100, 200);
-      const redPct    = Math.min((inp.calories    || 0) / (p.goals.red     || 500) * 100, 200);
-      totalPct += (waterPct + protPct + greenPct + redPct) / 4;
+      const w = Math.min((inp.water_oz||0)/(p.goals.water||1)*100,200);
+      const pr = Math.min((inp.protein_g||0)/(p.goals.protein||1)*100,200);
+      const g = Math.min((inp.exercise_min||0)/30*100,200);
+      const r = Math.min((inp.calories||0)/(p.goals.red||500)*100,200);
+      totalPct += (w+pr+g+r)/4;
     });
-    return loggedDays > 0 ? Math.round(totalPct / loggedDays) : 0;
+    return loggedDays > 0 ? Math.round(totalPct/loggedDays) : 0;
   };
 
-  // Best streak for a person
   const calcStreak = (personId) => {
     const p = participants.find(x => x.id === personId);
     if (!p) return 0;
     let streak = 0;
     const pastDays = days.filter(d => d <= today);
-    for (let i = pastDays.length - 1; i >= 0; i--) {
+    for (let i = pastDays.length-1; i >= 0; i--) {
       const inp = getInput(pastDays[i], personId);
       if (countHit(inp, p.goals) > 0) streak++;
       else break;
@@ -161,51 +180,65 @@ export default function App() {
     return streak;
   };
 
+  const calcAvgs = (personId) => {
+    const p = participants.find(x => x.id === personId);
+    if (!p) return { water:0, protein:0, exercise:0, calories:0 };
+    let w=0,pr=0,g=0,r=0,n=0;
+    Object.values(inputs).forEach(dayInputs => {
+      const inp = dayInputs?.[personId];
+      if (!inp) return;
+      const hasAny = (inp.water_oz||0)>0||(inp.protein_g||0)>0||(inp.exercise_min||0)>0||(inp.calories||0)>0;
+      if (!hasAny) return;
+      n++; w+=inp.water_oz||0; pr+=inp.protein_g||0; g+=inp.exercise_min||0; r+=inp.calories||0;
+    });
+    if (n===0) return { water:0, protein:0, exercise:0, calories:0 };
+    return { water:Math.round(w/n), protein:Math.round(pr/n), exercise:Math.round(g/n), calories:Math.round(r/n) };
+  };
+
   const triggerCelebration = (type, label) => {
     if (celebTimerRef.current) clearTimeout(celebTimerRef.current);
     setCelebration({ type, label });
-    celebTimerRef.current = setTimeout(() => setCelebration(null), type === 'all4' ? 3500 : 2000);
+    celebTimerRef.current = setTimeout(() => setCelebration(null), type==='all4'?3500:2000);
   };
 
   const openDayLog = (date) => {
     const existing = getInput(date, activeUser) || {};
     setDraftInputs({
-      water_oz: existing.water_oz || "",
-      protein_g: existing.protein_g || "",
-      exercise_min: existing.exercise_min || "",
-      calories: existing.calories || "",
+      water_oz: existing.water_oz||"",
+      protein_g: existing.protein_g||"",
+      exercise_min: existing.exercise_min||"",
+      calories: existing.calories||"",
     });
     setActiveDayLog(date);
   };
 
   const saveDayLog = async () => {
-    const p = participants.find(x => x.id === activeUser);
-    if (!p || !activeDayLog) return;
+    const p = participants.find(x => x.id===activeUser);
+    if (!p||!activeDayLog) return;
     setSaving(true);
     const row = {
       person_id: activeUser, date: activeDayLog,
-      water_oz: parseFloat(draftInputs.water_oz) || 0,
-      protein_g: parseFloat(draftInputs.protein_g) || 0,
-      exercise_min: parseFloat(draftInputs.exercise_min) || 0,
-      calories: parseFloat(draftInputs.calories) || 0,
+      water_oz: parseFloat(draftInputs.water_oz)||0,
+      protein_g: parseFloat(draftInputs.protein_g)||0,
+      exercise_min: parseFloat(draftInputs.exercise_min)||0,
+      calories: parseFloat(draftInputs.calories)||0,
     };
-    await supabase.from("daily_inputs").upsert(row, { onConflict: "person_id,date" });
+    await supabase.from("daily_inputs").upsert(row, { onConflict:"person_id,date" });
     const prevInp = getInput(activeDayLog, activeUser);
     const prevHit = countHit(prevInp, p.goals);
     const newHit = countHit(row, p.goals);
     const newGoalsObj = goalsHit(row, p.goals);
     const prevGoalsObj = goalsHit(prevInp, p.goals);
     setInputs(prev => {
-      const updated = { ...prev };
+      const updated = {...prev};
       if (!updated[activeDayLog]) updated[activeDayLog] = {};
       updated[activeDayLog][activeUser] = row;
       return updated;
     });
-    if (activeDayLog === today) {
-      if (newHit === 4 && prevHit < 4) {
-        triggerCelebration('all4', p.name);
-      } else if (newHit > prevHit) {
-        const newlyHit = Object.entries(newGoalsObj).find(([k,v]) => v && !prevGoalsObj[k]);
+    if (activeDayLog===today) {
+      if (newHit===4&&prevHit<4) triggerCelebration('all4', p.name);
+      else if (newHit>prevHit) {
+        const newlyHit = Object.entries(newGoalsObj).find(([k,v])=>v&&!prevGoalsObj[k]);
         if (newlyHit) {
           const labels = { water:'💧 Water goal hit!', protein:'🥩 Protein goal hit!', green:'🟢 Green ring hit!', red:'🔴 Red ring hit!' };
           triggerCelebration('single', labels[newlyHit[0]]);
@@ -219,49 +252,53 @@ export default function App() {
   const addParticipant = async () => {
     if (!newName.trim()) return;
     setSaving(true);
-    const id = newName.trim().toLowerCase().replace(/\s+/g,"_") + "_" + Date.now();
-    const color = COLORS[participants.length % COLORS.length];
+    const id = newName.trim().toLowerCase().replace(/\s+/g,"_")+"_"+Date.now();
+    const color = COLORS[participants.length%COLORS.length];
     const { data, error } = await supabase.from("participants").insert([{
-      id, name: newName.trim(), color,
-      goals: { water: parseInt(newGoals.water)||80, protein: parseInt(newGoals.protein)||130, red: parseInt(newGoals.red)||500 }
+      id, name:newName.trim(), color,
+      goals:{ water:parseInt(newGoals.water)||80, protein:parseInt(newGoals.protein)||130, red:parseInt(newGoals.red)||500 }
     }]).select().single();
-    if (!error && data) { setParticipants(prev => [...prev, data]); setUser(data.id); }
-    setNewName(""); setNewGoals({ water:"", protein:"", red:"" });
+    if (!error&&data) { setParticipants(prev=>[...prev,data]); setUser(data.id); }
+    setNewName(""); setNewGoals({water:"",protein:"",red:""});
     setAddingUser(false); setStep(1); setSaving(false);
   };
 
   const removeParticipant = async (id) => {
     setSaving(true);
-    await supabase.from("participants").delete().eq("id", id);
-    setParticipants(prev => prev.filter(p => p.id !== id));
-    if (activeUser === id) { setActiveUser(null); localStorage.removeItem("ss-active-user"); }
+    await supabase.from("participants").delete().eq("id",id);
+    setParticipants(prev=>prev.filter(p=>p.id!==id));
+    if (activeUser===id) { setActiveUser(null); localStorage.removeItem("ss-active-user"); }
     setSaving(false);
   };
 
   const sorted = [...participants].sort((a,b) => {
-    const ptsDiff = calcPoints(b.id) - calcPoints(a.id);
-    if (ptsDiff !== 0) return ptsDiff;
-    return calcExcess(b.id) - calcExcess(a.id); // tiebreaker: avg % over goal
+    const ptsDiff = calcPoints(b.id)-calcPoints(a.id);
+    if (ptsDiff!==0) return ptsDiff;
+    return calcExcess(b.id)-calcExcess(a.id);
   });
-  const pot = participants.length * BUYIN;
-  const first = Math.floor(pot * 0.7);
-  const second = Math.floor(pot * 0.3);
-  const activeParticipant = participants.find(p => p.id === activeUser);
-  const copyPrompt = () => { navigator.clipboard.writeText(AI_PROMPT).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2500); }); };
+  const pot = participants.length*BUYIN;
+  const first = Math.floor(pot*0.7);
+  const second = Math.floor(pot*0.3);
+  const activeParticipant = participants.find(p=>p.id===activeUser);
+  const copyPrompt = () => { navigator.clipboard.writeText(AI_PROMPT).then(()=>{ setCopied(true); setTimeout(()=>setCopied(false),2500); }); };
 
-  // Draft preview for log modal
+  const draftPerson = participants.find(x=>x.id===activeUser);
   const draftPreview = {
     water_oz: parseFloat(draftInputs.water_oz)||0,
     protein_g: parseFloat(draftInputs.protein_g)||0,
     exercise_min: parseFloat(draftInputs.exercise_min)||0,
     calories: parseFloat(draftInputs.calories)||0,
   };
-  const draftPerson = participants.find(x => x.id === activeUser);
   const draftHit = draftPerson ? goalsHit(draftPreview, draftPerson.goals) : {};
   const draftCount = draftPerson ? countHit(draftPreview, draftPerson.goals) : 0;
 
+  const currentWeek = weeks[visibleWeek] || [];
+  const weekDates = currentWeek.filter(Boolean);
+  const weekStart = weekDates[0] ? fmtShort(weekDates[0]) : "";
+  const weekEnd = weekDates[weekDates.length-1] ? fmtShort(weekDates[weekDates.length-1]) : "";
+
   return (
-    <div style={{ minHeight:"100vh", background:"#080810", color:"#fff", fontFamily:"Georgia,serif" }}>
+    <div style={{minHeight:"100vh",background:"#080810",color:"#fff",fontFamily:"Georgia,serif"}}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&display=swap');
         *{box-sizing:border-box;margin:0;padding:0;}
@@ -325,8 +362,6 @@ export default function App() {
         @keyframes popIn{0%{transform:scale(0.7);opacity:0;}70%{transform:scale(1.05);}100%{transform:scale(1);opacity:1;}}
         .bounce{animation:bnc 0.5s ease infinite alternate;}
         @keyframes bnc{0%{transform:translateY(0);}100%{transform:translateY(-8px);}}
-
-        /* Leaderboard row */
         .lb-row{display:flex;align-items:center;gap:12px;padding:14px 14px;border-bottom:1px solid rgba(255,255,255,0.04);transition:background 0.15s;}
         .lb-row:hover{background:rgba(255,255,255,0.02);}
         .lb-row.me{background:rgba(252,199,40,0.04);border-left:3px solid #FCC728;padding-left:11px;}
@@ -334,31 +369,24 @@ export default function App() {
         .lb-name{font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:0.5px;color:#fff;line-height:1;margin-bottom:2px;}
         .lb-sub{font-family:'DM Sans',sans-serif;font-size:10px;color:rgba(255,255,255,0.3);}
         .lb-pts{font-family:'Bebas Neue',sans-serif;font-size:36px;line-height:1;text-align:right;flex-shrink:0;}
-        .lb-bar-bg{height:3px;background:rgba(255,255,255,0.06);border-radius:99px;margin-top:6px;overflow:hidden;}
-        .lb-bar-fill{height:100%;border-radius:99px;transition:width 0.7s ease;}
-
-        /* Today pills on leaderboard */
         .today-pills{display:flex;gap:4px;margin-top:4px;flex-wrap:wrap;}
         .today-pill{font-size:10px;padding:2px 7px;border-radius:99px;font-family:'DM Sans',sans-serif;font-weight:500;}
         .today-pill.hit{background:rgba(76,175,80,0.15);border:1px solid rgba(76,175,80,0.3);color:#4caf50;}
         .today-pill.miss{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);color:rgba(255,255,255,0.25);}
-
-        /* Log tab day card */
-        .day-card{margin:8px 12px;border-radius:12px;border:1px solid rgba(255,255,255,0.07);overflow:hidden;}
-        .day-card.today-card{border-color:rgba(252,199,40,0.25);}
-        .day-card-header{display:flex;align-items:center;gap:10px;padding:12px 14px;cursor:pointer;transition:background 0.15s;}
-        .day-card-header:hover{background:rgba(255,255,255,0.02);}
-        .day-card.today-card .day-card-header{background:rgba(252,199,40,0.04);}
-        .day-num-big{font-family:'Bebas Neue',sans-serif;font-size:22px;color:rgba(255,255,255,0.18);width:28px;text-align:center;flex-shrink:0;}
-        .day-num-big.td{color:#FCC728;}
-        .log-stat{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid rgba(255,255,255,0.04);}
-        .log-stat:last-of-type{border-bottom:none;}
-        .log-btn-sm{background:rgba(252,199,40,0.1);border:1px solid rgba(252,199,40,0.2);border-radius:8px;padding:8px 14px;font-family:'DM Sans',sans-serif;font-size:12px;font-weight:600;color:#FCC728;cursor:pointer;transition:all 0.15s;width:100%;}
-        .log-btn-sm:hover{background:rgba(252,199,40,0.18);}
+        .stat-row{display:flex;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.04);}
+        .stat-row:last-child{border-bottom:none;}
+        .nav-btn{background:none;border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:5px 12px;color:rgba(255,255,255,0.4);font-family:'DM Sans',sans-serif;font-size:12px;cursor:pointer;transition:all 0.15s;}
+        .nav-btn:hover:not(:disabled){border-color:rgba(252,199,40,0.4);color:#FCC728;}
+        .nav-btn:disabled{opacity:0.2;cursor:not-allowed;}
+        .day-tile{flex:1;border-radius:12px;padding:8px 3px;text-align:center;cursor:pointer;transition:all 0.15s;}
+        .day-tile:active{transform:scale(0.95);}
+        .avg-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+        .avg-card{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:14px;padding:14px 12px;}
+        .hint-fade{transition:opacity 0.5s ease;}
       `}</style>
 
       {/* CELEBRATION */}
-      {celebration && (
+      {celebration&&(
         <div className="celeb-overlay">
           {celebration.type==='all4'?(
             <div className="celeb-all4">
@@ -488,12 +516,12 @@ export default function App() {
                 </div>
               </div>
               <div className="info-divider"/>
-              {signupOpen() ? (
+              {signupOpen()?(
                 <>
                   <button className="btn-gold" onClick={()=>{setActiveTab("manage");setAddingUser(true);}}>JOIN THE CHALLENGE 🔥</button>
                   <div className="note" style={{textAlign:"center",marginTop:10}}>After joining, send $20 to {VENMO} on Venmo.</div>
                 </>
-              ) : (
+              ):(
                 <div style={{background:"rgba(125,48,49,0.12)",border:"1px solid rgba(125,48,49,0.3)",borderRadius:14,padding:"20px 16px",textAlign:"center"}}>
                   <div style={{fontSize:28,marginBottom:8}}>🔒</div>
                   <div className="tf" style={{fontSize:24,letterSpacing:1,color:"#c04a4c",marginBottom:6}}>REGISTRATION CLOSED</div>
@@ -503,7 +531,7 @@ export default function App() {
             </div>
           )}
 
-          {/* ── BOARD (LEADERBOARD) ── */}
+          {/* ── BOARD ── */}
           {activeTab==="board"&&(
             <div style={{paddingBottom:80}}>
               {participants.length===0?(
@@ -513,7 +541,6 @@ export default function App() {
                 </div>
               ):(
                 <>
-                  {/* Prize strip */}
                   <div style={{display:"flex",gap:8,padding:"12px 12px 4px"}}>
                     {[["🥇","1st Place",`$${first}`,"rgba(252,199,40,0.08)","rgba(252,199,40,0.18)","#FCC728"],
                       ["🥈","2nd Place",`$${second}`,"rgba(192,192,192,0.06)","rgba(192,192,192,0.14)","rgba(200,200,200,0.7)"],
@@ -525,34 +552,27 @@ export default function App() {
                       </div>
                     ))}
                   </div>
-
-                  {/* Day progress */}
                   {hasStarted&&currentDayNum&&(
                     <div style={{margin:"8px 12px",background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.06)",borderRadius:10,padding:"10px 14px",display:"flex",alignItems:"center",gap:12}}>
-                      <div>
-                        <div className="tf" style={{fontSize:28,color:"#FCC728",lineHeight:1}}>DAY {currentDayNum}</div>
-                        <div className="note">{90-currentDayNum} days remaining</div>
-                      </div>
+                      <div><div className="tf" style={{fontSize:28,color:"#FCC728",lineHeight:1}}>DAY {currentDayNum}</div><div className="note">{90-currentDayNum} days remaining</div></div>
                       <div style={{flex:1}}>
                         <div style={{height:4,background:"rgba(255,255,255,0.06)",borderRadius:99,overflow:"hidden"}}>
-                          <div style={{height:"100%",width:`${(currentDayNum/90)*100}%`,background:"linear-gradient(90deg,#7D3031,#FCC728)",borderRadius:99,transition:"width 1s ease"}}/>
+                          <div style={{height:"100%",width:`${(currentDayNum/90)*100}%`,background:"linear-gradient(90deg,#7D3031,#FCC728)",borderRadius:99}}/>
                         </div>
                         <div className="note" style={{marginTop:4,textAlign:"right"}}>{Math.round((currentDayNum/90)*100)}% through</div>
                       </div>
                     </div>
                   )}
-
-                  {/* Leaderboard rows */}
                   <div style={{marginTop:8}}>
                     {sorted.map((p,i)=>{
-                      const pts = calcPoints(p.id);
-                      const pct = Math.round((pts/MAX_PER_PERSON)*100);
-                      const streak = calcStreak(p.id);
-                      const excess = calcExcess(p.id);
-                      const todayInp = getInput(today, p.id);
-                      const todayHit = goalsHit(todayInp, p.goals);
-                      const isMe = p.id === activeUser;
-                      const rankColor = i===0?"#FCC728":i===1?"rgba(200,200,200,0.6)":i===2?"rgba(205,127,50,0.7)":"rgba(255,255,255,0.15)";
+                      const pts=calcPoints(p.id);
+                      const pct=Math.round((pts/MAX_PER_PERSON)*100);
+                      const streak=calcStreak(p.id);
+                      const excess=calcExcess(p.id);
+                      const todayInp=getInput(today,p.id);
+                      const todayHit=goalsHit(todayInp,p.goals);
+                      const isMe=p.id===activeUser;
+                      const rankColor=i===0?"#FCC728":i===1?"rgba(200,200,200,0.6)":i===2?"rgba(205,127,50,0.7)":"rgba(255,255,255,0.15)";
                       return(
                         <div key={p.id} className={`lb-row ${isMe?"me":""}`}>
                           <div className="lb-rank" style={{color:rankColor}}>{i===0?"🥇":i===1?"🥈":i===2?"🥉":`#${i+1}`}</div>
@@ -565,14 +585,7 @@ export default function App() {
                               <div className="lb-sub">{streak>0?`🔥 ${streak} day streak`:"No streak yet"}</div>
                               <div className="lb-sub">·</div>
                               <div className="lb-sub">{pct}% complete</div>
-                              {excess>0&&(
-                                <>
-                                  <div className="lb-sub">·</div>
-                                  <div className="lb-sub" style={{color:excess>=150?"#4caf50":excess>=110?"#FCC728":"rgba(255,255,255,0.3)"}}>
-                                    {excess>=100?`🚀 ${excess}% avg`:`${excess}% avg`}
-                                  </div>
-                                </>
-                              )}
+                              {excess>0&&(<><div className="lb-sub">·</div><div className="lb-sub" style={{color:excess>=150?"#4caf50":excess>=110?"#FCC728":"rgba(255,255,255,0.3)"}}>{excess>=100?`🚀 ${excess}% avg`:`${excess}% avg`}</div></>)}
                             </div>
                             {hasStarted&&(
                               <div className="today-pills">
@@ -582,14 +595,12 @@ export default function App() {
                                   {icon:"🟢",h:todayHit.green,val:todayInp?.exercise_min,u:"m"},
                                   {icon:"🔴",h:todayHit.red,val:todayInp?.calories,u:"cal"},
                                 ].map(({icon,h,val,u},idx)=>(
-                                  <div key={idx} className={`today-pill ${h?"hit":"miss"}`}>
-                                    {icon} {val&&val>0?`${val}${u}`:"—"}
-                                  </div>
+                                  <div key={idx} className={`today-pill ${h?"hit":"miss"}`}>{icon} {val&&val>0?`${val}${u}`:"—"}</div>
                                 ))}
                               </div>
                             )}
                             <div style={{height:3,background:"rgba(255,255,255,0.06)",borderRadius:99,marginTop:6,overflow:"hidden"}}>
-                              <div style={{height:"100%",width:`${pct}%`,background:`linear-gradient(90deg,${p.color}66,${p.color})`,borderRadius:99,transition:"width 0.7s"}}/>
+                              <div style={{height:"100%",width:`${pct}%`,background:`linear-gradient(90deg,${p.color}66,${p.color})`,borderRadius:99}}/>
                             </div>
                           </div>
                           <div>
@@ -605,7 +616,7 @@ export default function App() {
             </div>
           )}
 
-          {/* ── LOG TAB ── */}
+          {/* ── LOG ── */}
           {activeTab==="log"&&(
             <div style={{paddingBottom:80}}>
               {!activeUser?(
@@ -615,79 +626,142 @@ export default function App() {
                 </div>
               ):!activeParticipant?(
                 <div style={{textAlign:"center",padding:"60px 24px",color:"rgba(255,255,255,0.3)"}} className="df">Player not found.</div>
-              ):(
-                <>
-                  {/* My stats summary */}
-                  <div style={{margin:"12px 12px 4px",background:"rgba(255,255,255,0.03)",border:`1px solid ${activeParticipant.color}44`,borderRadius:12,padding:"14px 16px"}}>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-                      <div>
-                        <div className="tf" style={{fontSize:24,color:activeParticipant.color}}>{activeParticipant.name}</div>
-                        <div className="note">{activeParticipant.goals.protein}g protein · {activeParticipant.goals.water}oz water · 30min · {activeParticipant.goals.red}cal</div>
+              ):(()=>{
+                const avgs = calcAvgs(activeUser);
+                const myPts = calcPoints(activeUser);
+                const expandedInp = expandedDay ? getInput(expandedDay, activeUser) : null;
+                const expandedHit = expandedDay ? goalsHit(expandedInp, activeParticipant.goals) : {};
+                const expandedPts = expandedDay ? countHit(expandedInp, activeParticipant.goals) : 0;
+                const isExpandedToday = expandedDay === today;
+
+                return (
+                  <div style={{padding:"14px 14px 0"}}>
+                    {/* Summary pill */}
+                    <div style={{display:"flex",alignItems:"center",gap:10,background:"rgba(255,255,255,0.03)",border:`1px solid ${activeParticipant.color}44`,borderRadius:12,padding:"12px 16px",marginBottom:18}}>
+                      <div style={{flex:1}}>
+                        <div className="tf" style={{fontSize:20,color:activeParticipant.color}}>{activeParticipant.name}</div>
+                        <div className="note">{activeParticipant.goals.protein}g · {activeParticipant.goals.water}oz · 30min · {activeParticipant.goals.red}cal</div>
                       </div>
                       <div style={{textAlign:"right"}}>
-                        <div className="tf" style={{fontSize:36,color:activeParticipant.color,lineHeight:1}}>{calcPoints(activeUser)}</div>
+                        <div className="tf" style={{fontSize:36,color:activeParticipant.color,lineHeight:1}}>{myPts}</div>
                         <div className="note">/ {MAX_PER_PERSON} pts</div>
                       </div>
                     </div>
-                    <div style={{height:4,background:"rgba(255,255,255,0.06)",borderRadius:99,marginTop:10,overflow:"hidden"}}>
-                      <div style={{height:"100%",width:`${Math.round((calcPoints(activeUser)/MAX_PER_PERSON)*100)}%`,background:`linear-gradient(90deg,${activeParticipant.color}66,${activeParticipant.color})`,borderRadius:99}}/>
-                    </div>
-                  </div>
 
-                  {/* Day cards — only past + today, newest first */}
-                  <div style={{marginTop:8}}>
-                    {days.filter(d=>d<=today).reverse().map((date,i)=>{
-                      const dayNum = getDayNumber(date);
-                      const isToday = date===today;
-                      const inp = getInput(date, activeUser);
-                      const hit = goalsHit(inp, activeParticipant.goals);
-                      const total = countHit(inp, activeParticipant.goals);
-                      return(
-                        <div key={date} className={`day-card ${isToday?"today-card":""}`}>
-                          <div className="day-card-header" onClick={()=>openDayLog(date)}>
-                            <div className={`day-num-big ${isToday?"td":""}`}>{dayNum}</div>
-                            <div style={{flex:1}}>
-                              <div style={{display:"flex",alignItems:"center",gap:6}}>
-                                <div className="df" style={{fontSize:13,fontWeight:500,color:isToday?"#FCC728":"rgba(255,255,255,0.7)"}}>{isToday?"Today":fmtShort(date)}</div>
-                                {total===4&&<span style={{fontSize:12}}>🏆</span>}
-                              </div>
-                              <div style={{display:"flex",gap:4,marginTop:4}}>
-                                {[hit.water,hit.protein,hit.green,hit.red].map((h,idx)=>(
-                                  <div key={idx} style={{width:16,height:3,borderRadius:99,background:h?"#4caf50":"rgba(255,255,255,0.1)"}}/>
-                                ))}
-                                <div className="note" style={{marginLeft:4,fontSize:10}}>{total}/4 pts</div>
-                              </div>
+                    {/* Week nav */}
+                    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+                      <button className="nav-btn" onClick={()=>setVisibleWeek(v=>Math.max(0,v-1))} disabled={visibleWeek===0}>← Prev</button>
+                      <div className="df" style={{fontSize:11,color:"rgba(255,255,255,0.35)",letterSpacing:0.5}}>{weekStart} – {weekEnd}</div>
+                      <button className="nav-btn" onClick={()=>setVisibleWeek(v=>Math.min(todayWeekIdx,v+1))} disabled={visibleWeek>=todayWeekIdx}>Next →</button>
+                    </div>
+
+                    {/* Day labels */}
+                    <div style={{display:"flex",gap:6,marginBottom:4}}>
+                      {DAY_LABELS.map(l=>(
+                        <div key={l} style={{flex:1,textAlign:"center"}}>
+                          <div className="df" style={{fontSize:9,fontWeight:600,letterSpacing:1,color:"rgba(255,255,255,0.2)",textTransform:"uppercase"}}>{l}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* 7-day grid */}
+                    <div style={{display:"flex",gap:6,marginBottom:6}}>
+                      {currentWeek.map((dateStr,idx)=>{
+                        if (!dateStr) return <div key={idx} style={{flex:1,borderRadius:12,background:"rgba(255,255,255,0.01)",border:"1px solid rgba(255,255,255,0.03)",padding:"8px 3px",minHeight:74}}/>;
+                        const isToday = dateStr===today;
+                        const isFuture = dateStr>today;
+                        const isSelected = expandedDay===dateStr;
+                        const inp = getInput(dateStr, activeUser);
+                        const hit = goalsHit(inp, activeParticipant.goals);
+                        const pts = countHit(inp, activeParticipant.goals);
+                        return (
+                          <div key={dateStr} className="day-tile"
+                            onClick={()=>{ if(isFuture)return; setExpandedDay(isSelected?null:dateStr); setLogHinted(true); }}
+                            style={{
+                              opacity:isFuture?0.25:1,
+                              cursor:isFuture?"default":"pointer",
+                              background:isSelected?"rgba(252,199,40,0.1)":isToday?"rgba(252,199,40,0.05)":"rgba(255,255,255,0.03)",
+                              border:`1.5px solid ${isSelected?"rgba(252,199,40,0.55)":isToday?"rgba(252,199,40,0.2)":"rgba(255,255,255,0.07)"}`,
+                            }}>
+                            {isToday&&<div className="df" style={{fontSize:8,fontWeight:700,color:"#FCC728",marginBottom:2,letterSpacing:1}}>TODAY</div>}
+                            <div className="tf" style={{fontSize:20,lineHeight:1,marginTop:isToday?0:4,color:isFuture?"rgba(255,255,255,0.1)":pts===4?"#4caf50":pts>=2?"#FCC728":"rgba(255,255,255,0.3)"}}>
+                              {isFuture?"—":pts}
                             </div>
-                            <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:2}}>
-                              <div className="tf" style={{fontSize:20,color:total>0?activeParticipant.color:"rgba(255,255,255,0.2)"}}>{total}pt</div>
-                              <div className="df" style={{fontSize:10,color:"rgba(252,199,40,0.6)"}}>
-                                {inp?"✏️ edit":"➕ log"}
+                            <div className="note" style={{fontSize:8,marginTop:2}}>pts</div>
+                            {!isFuture&&(
+                              <div style={{display:"flex",gap:2,justifyContent:"center",marginTop:5}}>
+                                {[hit.water,hit.protein,hit.green,hit.red].map((h,i2)=>(
+                                  <div key={i2} style={{width:4,height:4,borderRadius:"50%",background:h?"#4caf50":"rgba(255,255,255,0.1)"}}/>
+                                ))}
                               </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Hint */}
+                    <div style={{opacity:logHinted?0:1,height:logHinted?0:"auto",overflow:"hidden",textAlign:"center",marginBottom:10,transition:"opacity 0.5s ease"}}>
+                      <div className="df" style={{fontSize:11,color:"rgba(255,255,255,0.25)"}}>👆 Tap any day to see details</div>
+                    </div>
+
+                    {/* Expanded day card */}
+                    {expandedDay&&expandedDay<=today&&(
+                      <div style={{background:"rgba(255,255,255,0.035)",border:`1px solid ${isExpandedToday?"rgba(252,199,40,0.25)":"rgba(255,255,255,0.08)"}`,borderTop:`3px solid ${isExpandedToday?"#FCC728":"rgba(255,255,255,0.15)"}`,borderRadius:14,padding:"16px",marginBottom:18}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+                          <div>
+                            <div className="tf" style={{fontSize:24,color:isExpandedToday?"#FCC728":"#fff",lineHeight:1}}>
+                              {isExpandedToday?"TODAY":fmtShort(expandedDay)}
+                            </div>
+                            <div className="note">Day {getDayNumber(expandedDay)}</div>
+                          </div>
+                          <div className="tf" style={{fontSize:30,color:expandedPts===4?"#4caf50":"#FCC728"}}>{expandedPts}/4 PTS</div>
+                        </div>
+                        {[
+                          {icon:"💧",val:expandedInp?.water_oz,goal:activeParticipant.goals.water,unit:"oz",h:expandedHit.water},
+                          {icon:"🥩",val:expandedInp?.protein_g,goal:activeParticipant.goals.protein,unit:"g",h:expandedHit.protein},
+                          {icon:"🟢",val:expandedInp?.exercise_min,goal:30,unit:"min",h:expandedHit.green},
+                          {icon:"🔴",val:expandedInp?.calories,goal:activeParticipant.goals.red,unit:"cal",h:expandedHit.red},
+                        ].map(({icon,val,goal,unit,h})=>(
+                          <div key={unit} className="stat-row">
+                            <span style={{fontSize:18,width:24,flexShrink:0}}>{icon}</span>
+                            <span className="tf" style={{fontSize:24,color:h?"#4caf50":"rgba(255,255,255,0.45)",lineHeight:1}}>{val&&val>0?val:"—"}</span>
+                            <span className="note" style={{flex:1,marginLeft:4}}>/ {goal}{unit}</span>
+                            <span style={{fontSize:14}}>{h?"✅":"⬜"}</span>
+                          </div>
+                        ))}
+                        <button style={{marginTop:14,width:"100%",background:"rgba(252,199,40,0.1)",border:"1px solid rgba(252,199,40,0.25)",borderRadius:10,padding:"11px",fontFamily:"DM Sans",fontSize:13,fontWeight:600,color:"#FCC728",cursor:"pointer"}}
+                          onClick={()=>openDayLog(expandedDay)}>
+                          ✏️ {isExpandedToday?"Edit Today's Log":"Edit This Day"}
+                        </button>
+                      </div>
+                    )}
+
+                    {/* All-time averages */}
+                    <div className="df" style={{fontSize:10,letterSpacing:3,textTransform:"uppercase",color:"rgba(255,255,255,0.25)",marginBottom:10}}>All-time averages</div>
+                    <div className="avg-grid">
+                      {[
+                        {icon:"💧",label:"Avg Water",val:avgs.water,goal:activeParticipant.goals.water,unit:"oz"},
+                        {icon:"🥩",label:"Avg Protein",val:avgs.protein,goal:activeParticipant.goals.protein,unit:"g"},
+                        {icon:"🟢",label:"Avg Exercise",val:avgs.exercise,goal:30,unit:"min"},
+                        {icon:"🔴",label:"Avg Calories",val:avgs.calories,goal:activeParticipant.goals.red,unit:"cal"},
+                      ].map(({icon,label,val,goal,unit})=>{
+                        const h = val>=goal;
+                        return(
+                          <div key={label} className="avg-card">
+                            <div className="df" style={{fontSize:11,color:"rgba(255,255,255,0.35)",marginBottom:6}}>{icon} {label}</div>
+                            <div className="tf" style={{fontSize:32,color:h?"#4caf50":"#FCC728",lineHeight:1,marginBottom:4}}>{val||"—"}</div>
+                            <div className="note">/ {goal}{unit}</div>
+                            <div style={{marginTop:8,height:3,background:"rgba(255,255,255,0.06)",borderRadius:99,overflow:"hidden"}}>
+                              <div style={{height:"100%",width:`${Math.min(((val||0)/goal)*100,100)}%`,background:h?"#4caf50":"#FCC728",borderRadius:99}}/>
                             </div>
                           </div>
-                          {inp&&(
-                            <div style={{borderTop:"1px solid rgba(255,255,255,0.05)"}}>
-                              {[
-                                {icon:"💧",val:inp.water_oz,unit:"oz",goal:activeParticipant.goals.water,h:hit.water},
-                                {icon:"🥩",val:inp.protein_g,unit:"g",goal:activeParticipant.goals.protein,h:hit.protein},
-                                {icon:"🟢",val:inp.exercise_min,unit:"min",goal:30,h:hit.green},
-                                {icon:"🔴",val:inp.calories,unit:"cal",goal:activeParticipant.goals.red,h:hit.red},
-                              ].map(({icon,val,unit,goal,h},idx)=>(
-                                <div key={idx} className="log-stat">
-                                  <span style={{fontSize:16,width:22,textAlign:"center",flexShrink:0}}>{icon}</span>
-                                  <span className="df" style={{flex:1,fontSize:13,color:h?"#4caf50":"rgba(255,255,255,0.5)",fontWeight:500}}>{val>0?val:"—"} {unit}</span>
-                                  <span className="note">/ {goal}{unit}</span>
-                                  <span style={{fontSize:12,width:20,textAlign:"center"}}>{h?"✅":""}</span>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
+                        );
+                      })}
+                    </div>
                   </div>
-                </>
-              )}
+                );
+              })()}
             </div>
           )}
 
@@ -733,12 +807,12 @@ export default function App() {
                   <button onClick={()=>removeParticipant(p.id)} disabled={saving} style={{background:"none",border:"1px solid rgba(255,255,255,0.09)",color:"rgba(255,255,255,0.28)",borderRadius:8,padding:"5px 11px",cursor:"pointer",fontFamily:"DM Sans",fontSize:11,flexShrink:0}}>Remove</button>
                 </div>
               ))}
-              {signupOpen() ? (
+              {signupOpen()?(
                 <>
                   <button className="btn-gold" style={{marginTop:10}} onClick={()=>setAddingUser(true)} disabled={saving}>+ JOIN THE CHALLENGE</button>
                   <div className="note" style={{textAlign:"center",marginTop:10}}>After joining, send $20 to {VENMO} on Venmo.</div>
                 </>
-              ) : (
+              ):(
                 <div style={{background:"rgba(125,48,49,0.1)",border:"1px solid rgba(125,48,49,0.25)",borderRadius:12,padding:"16px",textAlign:"center",marginTop:10}}>
                   <div className="tf" style={{fontSize:20,color:"#c04a4c",letterSpacing:1,marginBottom:4}}>🔒 REGISTRATION CLOSED</div>
                   <div className="note">Sign-ups closed at 2:00 PM PT on April 2.</div>
@@ -759,10 +833,7 @@ export default function App() {
               {participants.map(p=>(
                 <div key={p.id} className={`user-option ${activeUser===p.id?"selected":""}`} onClick={()=>setUser(p.id)}>
                   <div style={{width:10,height:10,borderRadius:"50%",background:p.color,flexShrink:0}}/>
-                  <div style={{flex:1}}>
-                    <div className="tf" style={{fontSize:22}}>{p.name}</div>
-                    <div className="note">{p.goals.protein}g · {p.goals.water}oz · {p.goals.red}cal</div>
-                  </div>
+                  <div style={{flex:1}}><div className="tf" style={{fontSize:22}}>{p.name}</div><div className="note">{p.goals.protein}g · {p.goals.water}oz · {p.goals.red}cal</div></div>
                   {activeUser===p.id&&<span style={{color:"#FCC728",fontSize:18}}>✓</span>}
                 </div>
               ))}
@@ -827,8 +898,6 @@ export default function App() {
                 <div className="note" style={{textAlign:"right"}}>{activeDayLog===today?`Day ${currentDayNum}`:fmtShort(activeDayLog)}</div>
               </div>
             </div>
-
-            {/* Live preview bar */}
             <div style={{display:"flex",gap:8,marginBottom:20,background:"rgba(255,255,255,0.03)",borderRadius:12,padding:"12px 16px",border:"1px solid rgba(255,255,255,0.07)"}}>
               <div className="tf" style={{fontSize:36,color:draftPerson.color,lineHeight:1}}>{draftCount}</div>
               <div style={{flex:1}}>
@@ -841,7 +910,6 @@ export default function App() {
               </div>
               {draftCount===4&&<div style={{fontSize:24}}>🏆</div>}
             </div>
-
             {[
               {key:"water_oz",icon:"💧",label:"Water",unit:"oz",goal:draftPerson.goals.water,hit:draftHit.water},
               {key:"protein_g",icon:"🥩",label:"Protein",unit:"grams",goal:draftPerson.goals.protein,hit:draftHit.protein},
