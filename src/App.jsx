@@ -98,6 +98,7 @@ export default function App() {
   const [logHinted, setLogHinted] = useState(false);
   const [expandedDay, setExpandedDay] = useState(null);
   const [visibleWeek, setVisibleWeek] = useState(0);
+  const [selectedAvgCat, setSelectedAvgCat] = useState(null);
   const celebTimerRef = useRef(null);
   const today = todayStr();
   const days = buildDays();
@@ -387,7 +388,24 @@ export default function App() {
         .day-tile{flex:1;border-radius:12px;padding:8px 3px;text-align:center;cursor:pointer;transition:all 0.15s;}
         .day-tile:active{transform:scale(0.95);}
         .avg-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
-        .avg-card{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:14px;padding:14px 12px;}
+        .avg-card{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:14px;padding:14px 12px;cursor:pointer;transition:all 0.15s;position:relative;}
+        .avg-card:hover{border-color:rgba(255,255,255,0.18);transform:scale(1.02);}
+        .avg-card.asel-green{border-color:rgba(76,175,80,0.5);background:rgba(76,175,80,0.06);}
+        .avg-card.asel-yellow{border-color:rgba(252,199,40,0.5);background:rgba(252,199,40,0.06);}
+        .avg-tap{font-family:'DM Sans',sans-serif;font-size:9px;color:rgba(255,255,255,0.2);position:absolute;top:8px;right:10px;letter-spacing:0.5px;}
+        .hist-panel{background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.08);border-radius:14px;overflow:hidden;margin-bottom:16px;animation:slideDown 0.2s ease;}
+        @keyframes slideDown{from{opacity:0;transform:translateY(-6px);}to{opacity:1;transform:translateY(0);}}
+        .hist-header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.06);}
+        .hist-scroll{max-height:260px;overflow-y:auto;}
+        .hist-scroll::-webkit-scrollbar{width:3px;}
+        .hist-scroll::-webkit-scrollbar-track{background:transparent;}
+        .hist-scroll::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:99px;}
+        .hist-row{display:flex;align-items:center;gap:10px;padding:9px 16px;border-bottom:1px solid rgba(255,255,255,0.04);}
+        .hist-row:last-child{border-bottom:none;}
+        .hist-bar-bg{flex:1;height:5px;background:rgba(255,255,255,0.06);border-radius:99px;overflow:hidden;}
+        .hist-bar-fill{height:100%;border-radius:99px;transition:width 0.4s ease;}
+        .close-btn{background:none;border:1px solid rgba(255,255,255,0.1);border-radius:99px;padding:4px 12px;color:rgba(255,255,255,0.4);font-family:'DM Sans',sans-serif;font-size:11px;cursor:pointer;}
+        .close-btn:hover{border-color:rgba(255,255,255,0.3);color:#fff;}
         .hint-fade{transition:opacity 0.5s ease;}
       `}</style>
 
@@ -744,17 +762,20 @@ export default function App() {
                     )}
 
                     {/* All-time averages */}
-                    <div className="df" style={{fontSize:10,letterSpacing:3,textTransform:"uppercase",color:"rgba(255,255,255,0.25)",marginBottom:10}}>All-time averages</div>
-                    <div className="avg-grid">
+                    <div className="df" style={{fontSize:10,letterSpacing:3,textTransform:"uppercase",color:"rgba(255,255,255,0.25)",marginBottom:10}}>All-time averages · tap to explore</div>
+                    <div className="avg-grid" style={{marginBottom:12}}>
                       {[
-                        {icon:"💧",label:"Avg Water",val:avgs.water,goal:activeParticipant.goals.water,unit:"oz"},
-                        {icon:"🥩",label:"Avg Protein",val:avgs.protein,goal:activeParticipant.goals.protein,unit:"g"},
-                        {icon:"🟢",label:"Avg Exercise",val:avgs.exercise,goal:30,unit:"min"},
-                        {icon:"🔴",label:"Avg Calories",val:avgs.calories,goal:activeParticipant.goals.red,unit:"cal"},
-                      ].map(({icon,label,val,goal,unit})=>{
+                        {key:"water",   icon:"💧",label:"Avg Water",   val:avgs.water,   goal:activeParticipant.goals.water,  unit:"oz"},
+                        {key:"protein", icon:"🥩",label:"Avg Protein", val:avgs.protein, goal:activeParticipant.goals.protein,unit:"g"},
+                        {key:"exercise",icon:"🟢",label:"Avg Exercise",val:avgs.exercise,goal:30,                             unit:"min"},
+                        {key:"calories",icon:"🔴",label:"Avg Calories",val:avgs.calories,goal:activeParticipant.goals.red,   unit:"cal"},
+                      ].map(({key,icon,label,val,goal,unit})=>{
                         const h = val>=goal;
+                        const isSel = selectedAvgCat===key;
                         return(
-                          <div key={label} className="avg-card">
+                          <div key={key} className={`avg-card ${isSel?(h?"asel-green":"asel-yellow"):""}`}
+                            onClick={()=>setSelectedAvgCat(isSel?null:key)}>
+                            <div className="avg-tap">{isSel?"▲":"▼"}</div>
                             <div className="df" style={{fontSize:11,color:"rgba(255,255,255,0.35)",marginBottom:6}}>{icon} {label}</div>
                             <div className="tf" style={{fontSize:32,color:h?"#4caf50":"#FCC728",lineHeight:1,marginBottom:4}}>{val||"—"}</div>
                             <div className="note">/ {goal}{unit}</div>
@@ -765,6 +786,62 @@ export default function App() {
                         );
                       })}
                     </div>
+
+                    {/* History panel */}
+                    {selectedAvgCat&&(()=>{
+                      const catMeta = {
+                        water:    {icon:"💧",label:"Water",   goal:activeParticipant.goals.water,  unit:"oz",  key:"water_oz"},
+                        protein:  {icon:"🥩",label:"Protein", goal:activeParticipant.goals.protein,unit:"g",   key:"protein_g"},
+                        exercise: {icon:"🟢",label:"Exercise",goal:30,                             unit:"min", key:"exercise_min"},
+                        calories: {icon:"🔴",label:"Calories",goal:activeParticipant.goals.red,   unit:"cal", key:"calories"},
+                      }[selectedAvgCat];
+                      const histDays = days
+                        .filter(d=>d<today&&inputs?.[d]?.[activeUser])
+                        .map(d=>({ date:fmtShort(d), val:inputs[d][activeUser][catMeta.key]||0, dayNum:getDayNumber(d) }))
+                        .filter(d=>d.val>0)
+                        .reverse();
+                      return(
+                        <div className="hist-panel">
+                          <div className="hist-header">
+                            <div style={{display:"flex",alignItems:"center",gap:8}}>
+                              <span style={{fontSize:20}}>{catMeta.icon}</span>
+                              <div>
+                                <div className="tf" style={{fontSize:20,letterSpacing:0.5}}>{catMeta.label} History</div>
+                                <div className="note">Goal: {catMeta.goal}{catMeta.unit} · {histDays.length} days logged</div>
+                              </div>
+                            </div>
+                            <button className="close-btn" onClick={()=>setSelectedAvgCat(null)}>✕</button>
+                          </div>
+                          <div className="hist-scroll">
+                            {histDays.length===0?(
+                              <div className="df" style={{padding:"20px",textAlign:"center",color:"rgba(255,255,255,0.3)",fontSize:13}}>No data yet</div>
+                            ):histDays.map(({date,val,dayNum})=>{
+                              const h = val>=catMeta.goal;
+                              const pct = Math.min((val/catMeta.goal)*100,100);
+                              const overPct = val>catMeta.goal?Math.round(((val-catMeta.goal)/catMeta.goal)*100):null;
+                              return(
+                                <div key={date} className="hist-row">
+                                  <div className="df" style={{fontSize:10,color:"rgba(255,255,255,0.3)",width:44,flexShrink:0}}>Day {dayNum}</div>
+                                  <div className="df" style={{fontSize:11,color:"rgba(255,255,255,0.35)",width:46,flexShrink:0}}>{date}</div>
+                                  <div className="hist-bar-bg">
+                                    <div className="hist-bar-fill" style={{width:`${pct}%`,background:h?"#4caf50":"#FCC728"}}/>
+                                  </div>
+                                  <div className="tf" style={{fontSize:18,color:h?"#4caf50":"#FCC728",width:48,textAlign:"right",flexShrink:0}}>{val}</div>
+                                  <div style={{width:36,textAlign:"right",flexShrink:0}}>
+                                    {h?(
+                                      overPct?<span className="df" style={{fontSize:10,color:"rgba(76,175,80,0.6)"}}>+{overPct}%</span>:<span style={{fontSize:12}}>✅</span>
+                                    ):(
+                                      <span className="df" style={{fontSize:10,color:"rgba(255,255,255,0.2)"}}>{Math.round(pct)}%</span>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })()}
+
                   </div>
                 );
               })()}
