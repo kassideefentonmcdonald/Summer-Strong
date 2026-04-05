@@ -183,16 +183,22 @@ export default function App() {
   const calcAvgs = (personId) => {
     const p = participants.find(x => x.id === personId);
     if (!p) return { water:0, protein:0, exercise:0, calories:0 };
-    let w=0,pr=0,g=0,r=0,n=0;
-    Object.values(inputs).forEach(dayInputs => {
+    let w=0,pr=0,g=0,r=0,nw=0,np=0,ng=0,nr=0;
+    Object.entries(inputs).forEach(([date, dayInputs]) => {
+      if (date === today) return; // exclude today — day isn't done yet
       const inp = dayInputs?.[personId];
       if (!inp) return;
-      const hasAny = (inp.water_oz||0)>0||(inp.protein_g||0)>0||(inp.exercise_min||0)>0||(inp.calories||0)>0;
-      if (!hasAny) return;
-      n++; w+=inp.water_oz||0; pr+=inp.protein_g||0; g+=inp.exercise_min||0; r+=inp.calories||0;
+      if ((inp.water_oz||0)>0)     { w+=inp.water_oz;    nw++; }
+      if ((inp.protein_g||0)>0)    { pr+=inp.protein_g;  np++; }
+      if ((inp.exercise_min||0)>0) { g+=inp.exercise_min;ng++; }
+      if ((inp.calories||0)>0)     { r+=inp.calories;    nr++; }
     });
-    if (n===0) return { water:0, protein:0, exercise:0, calories:0 };
-    return { water:Math.round(w/n), protein:Math.round(pr/n), exercise:Math.round(g/n), calories:Math.round(r/n) };
+    return {
+      water:    nw>0?Math.round(w/nw):0,
+      protein:  np>0?Math.round(pr/np):0,
+      exercise: ng>0?Math.round(g/ng):0,
+      calories: nr>0?Math.round(r/nr):0,
+    };
   };
 
   const triggerCelebration = (type, label) => {
